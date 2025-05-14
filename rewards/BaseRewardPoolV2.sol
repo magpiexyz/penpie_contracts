@@ -5,6 +5,7 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import  { IMasterPenpie } from "../interfaces/IMasterPenpie.sol";
 
 import "../interfaces/IBaseRewardPool.sol";
@@ -12,7 +13,7 @@ import "../interfaces/IBaseRewardPool.sol";
 /// @title A contract for managing rewards for a pool
 /// @author Magpie Team
 /// @notice You can use this contract for getting informations about rewards for a specific pools
-contract BaseRewardPoolV2 is Ownable, IBaseRewardPool {
+contract BaseRewardPoolV2 is Ownable, ReentrancyGuard, IBaseRewardPool {
     using SafeERC20 for IERC20Metadata;
     using SafeERC20 for IERC20;
 
@@ -81,9 +82,9 @@ contract BaseRewardPoolV2 is Ownable, IBaseRewardPool {
                 queuedRewards: 0
             });
             rewardTokens.push(_rewardToken);
+            isRewardToken[_rewardToken] = true;
         }
 
-        isRewardToken[_rewardToken] = true;
         rewardQueuers[_rewardQueuer] = true;
     }
 
@@ -213,13 +214,14 @@ contract BaseRewardPoolV2 is Ownable, IBaseRewardPool {
 
     /// @notice Updates the reward information for one account
     /// @param _account Address account
-    function updateFor(address _account) override external {
+    function updateFor(address _account) override external nonReentrant {
         _updateFor(_account);
     }
 
     function getReward(address _account, address _receiver)
         public
         onlyMasterPenpie
+        nonReentrant
         updateReward(_account)
         returns (bool)
     {
@@ -235,6 +237,7 @@ contract BaseRewardPoolV2 is Ownable, IBaseRewardPool {
     function getRewards(address _account, address _receiver, address[] memory _rewardTokens) override
         external
         onlyMasterPenpie
+        nonReentrant
         updateRewards(_account, _rewardTokens)
     {
        uint256 length = _rewardTokens.length;
@@ -248,7 +251,7 @@ contract BaseRewardPoolV2 is Ownable, IBaseRewardPool {
     /// @notice Sends new rewards to be distributed to the users staking. Only possible to donate already registered token
     /// @param _amountReward Amount of reward token to be distributed
     /// @param _rewardToken Address reward token
-    function donateRewards(uint256 _amountReward, address _rewardToken) external {
+    function donateRewards(uint256 _amountReward, address _rewardToken) external nonReentrant {
         if (!isRewardToken[_rewardToken])
             revert MustBeRewardToken();
 
@@ -269,6 +272,7 @@ contract BaseRewardPoolV2 is Ownable, IBaseRewardPool {
     function queueNewRewards(uint256 _amountReward, address _rewardToken)
         override
         external
+        nonReentrant
         onlyRewardQueuer
         returns (bool)
     {

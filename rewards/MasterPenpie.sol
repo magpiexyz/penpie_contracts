@@ -13,6 +13,7 @@ import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/securit
 import "../PenpieOFT.sol";
 import "../rewards/BaseRewardPoolV2.sol";
 import "../interfaces/IBaseRewardPool.sol";
+import "../interfaces/IARBRewarder.sol";
 import "../interfaces/IVLPenpieBaseRewarder.sol";
 import "../interfaces/IVLPenpie.sol";
 import "../libraries/ERC20FactoryLib.sol";
@@ -88,8 +89,18 @@ contract MasterPenpie is
     mapping(address => bool) public PoolManagers;
     mapping(address => bool) public AllocationManagers;
 
-    /* ==== variable added for mPendleSV contract === */
+     /* ==== variable added for mPendleSV contract === */
     address public mPendleSV;
+    address public compounder;
+
+    /* variable added for 1st upgrade */
+    address public ARBRewarder;
+
+    /* variable added for 2nd upgrade */
+    mapping(address => bool) public allowedPauser;
+
+    /* variable added for 3rd upgrade */
+    mapping(address => address) public legacyRewarders;
 
     /* ============ Events ============ */
 
@@ -102,7 +113,11 @@ contract MasterPenpie is
     event Set(
         address indexed _stakingToken,
         uint256 _allocPoint,
-        IBaseRewardPool indexed _rewarder
+        IBaseRewardPool indexed _rewarder,
+        bool isActive
+    );
+    event PoolRemoved(
+        address indexed _stakingToken
     );
     event Deposit(
         address indexed _user,
@@ -140,6 +155,7 @@ contract MasterPenpie is
     );
     event PoolManagerStatus(address _account, bool _status);
     event VlPenpieUpdated(address _newvlPenpie, address _oldvlPenpie);
+    event CompounderUpdated(address _newCompounder, address _oldCompounder);
     event mPendleSVUpdated(address _newMPendleSV, address _oldMPendleSV);
     event DepositNotAvailable(
         address indexed _user,
@@ -147,6 +163,11 @@ contract MasterPenpie is
         uint256 _amount
     );
     event PenpieOFTSet(address _penpie);
+    event ARBRewarderSet(address _oldARBRewarder, address _newARBRewarder);
+    event ARBRewarderSetAsQueuer(address rewarder);
+    event UpdatePauserStatus(address indexed _pauser, bool _allowed);
+    event UpdateWhiteListedAllocManager(address indexed _account, bool _allowed);
+    event LegacyRewarderSet(address indexed _stakingToken, address indexed _legacyRewarder);
 
     /* ============ Errors ============ */
 
@@ -165,6 +186,10 @@ contract MasterPenpie is
     error MustBeContract();
     error LengthMismatch();
     error OnlyWhiteListedAllocaUpdator();
+    error OnlyCompounder();
+    error onlyARBRewarder();
+    error OnlyPauser();
+    error ReceiptTokenAlreadyOccupied();
 
     /* ============ Constructor ============ */
 
@@ -218,12 +243,23 @@ contract MasterPenpie is
         if (msg.sender != address(vlPenpie)) revert OnlyVlPenpie();
         _;
     }
+    
+    modifier _onlyCompounder() {
+        if (msg.sender != compounder)
+            revert OnlyCompounder();
+        _;
+    }
 
     modifier _onlyMPendleSV() {
         if (msg.sender != address(mPendleSV))
             revert OnlyMPendleSV();
         _;
-    }  
+    } 
+
+    modifier onlyPauser() {
+        if (!allowedPauser[msg.sender]) revert OnlyPauser();
+        _;
+    }    
 
     /* ============ External Getters ============ */
 
@@ -299,16 +335,26 @@ contract MasterPenpie is
 
         // If it's a multiple reward farm, we return info about the specific bonus token
         if (
-            address(pool.rewarder) != address(0) && _rewardToken != address(0)
+            _rewardToken != address(0)
         ) {
             (bonusTokenAddress, bonusTokenSymbol) = (
                 _rewardToken,
                 IERC20Metadata(_rewardToken).symbol()
             );
-            pendingBonusToken = IBaseRewardPool(pool.rewarder).earned(
-                _user,
-                _rewardToken
-            );
+            if (address(pool.rewarder) != address(0)) {
+                pendingBonusToken = IBaseRewardPool(pool.rewarder).earned(
+                    _user,
+                    _rewardToken
+                );
+            }
+
+            IBaseRewardPool legacyRewarder = IBaseRewardPool(legacyRewarders[_stakingToken]);
+            if (address(legacyRewarder) != address(0)) {
+                pendingBonusToken += IBaseRewardPool(legacyRewarder).earned(
+                    _user,
+                    _rewardToken
+                );
+            }
         }
     }
 
@@ -337,6 +383,10 @@ contract MasterPenpie is
                 _user
             );
         }
+    }
+
+    function getRewarder(address stakingToken) external view returns(address){
+        return tokenToPoolInfo[stakingToken].rewarder;
     }
 
     /* ============ External Functions ============ */
@@ -393,13 +443,11 @@ contract MasterPenpie is
     /// @param _stakingToken Staking token of the pool
     function updatePool(address _stakingToken) public whenNotPaused {
         PoolInfo storage pool = tokenToPoolInfo[_stakingToken];
-        if (
-            block.timestamp <= pool.lastRewardTimestamp || totalAllocPoint == 0
-        ) {
+        if (block.timestamp <= pool.lastRewardTimestamp) {
             return;
         }
         uint256 lpSupply = pool.totalStaked;
-        if (lpSupply == 0) {
+        if (lpSupply == 0 || totalAllocPoint == 0) {
             pool.lastRewardTimestamp = block.timestamp;
             return;
         }
@@ -432,7 +480,7 @@ contract MasterPenpie is
         address[] calldata _stakingTokens,
         address[][] memory _rewardTokens,
         bool _withPNP
-    ) external whenNotPaused {
+    ) external nonReentrant whenNotPaused {
         _multiClaim(_stakingTokens, msg.sender, msg.sender, _rewardTokens, _withPNP);
     }
 
@@ -441,8 +489,14 @@ contract MasterPenpie is
     function multiclaimSpec(
         address[] calldata _stakingTokens,
         address[][] memory _rewardTokens
-    ) external whenNotPaused {
+    ) external nonReentrant whenNotPaused {
         _multiClaim(_stakingTokens, msg.sender, msg.sender, _rewardTokens, true);
+    }
+
+    function multiclaimOnBehalf(address[] calldata _stakingTokens, address[][] memory _rewardTokens, address _account, bool _isClaimPNP)
+        external nonReentrant whenNotPaused _onlyCompounder
+    {
+        _multiClaim(_stakingTokens, _account, msg.sender, _rewardTokens, _isClaimPNP);
     }
 
     /// @notice Claims for each of the pools with specified rewards to claim for each pool
@@ -450,14 +504,14 @@ contract MasterPenpie is
         address[] calldata _stakingTokens,
         address[][] memory _rewardTokens,
         address _account
-    ) external whenNotPaused {
+    ) external nonReentrant whenNotPaused {
         _multiClaim(_stakingTokens, _account, _account, _rewardTokens, true);
     }
 
     /// @notice Claim for all rewards for the pools
     function multiclaim(
         address[] calldata _stakingTokens
-    ) external whenNotPaused {
+    ) external nonReentrant whenNotPaused {
         address[][] memory rewardTokens = new address[][](
             _stakingTokens.length
         );
@@ -477,7 +531,7 @@ contract MasterPenpie is
 
         if (_from != address(0)) _harvestRewards(_stakingToken, _from);
 
-        if (_to != address(0)) _harvestRewards(_stakingToken, _to);
+        if (_from != _to) _harvestRewards(_stakingToken, _to);
     }
 
     function afterReceiptTokenTransfer(
@@ -515,28 +569,28 @@ contract MasterPenpie is
         uint256 _amount,
         address _for
     ) external whenNotPaused nonReentrant _onlyVlPenpie {
-        _deposit(address(vlPenpie), msg.sender, _for, _amount, true);
+        _deposit(address(vlPenpie), msg.sender, _for, _amount);
     }
 
     function withdrawVlPenpieFor(
         uint256 _amount,
         address _for
     ) external whenNotPaused nonReentrant _onlyVlPenpie {
-        _withdraw(address(vlPenpie), _for, _amount, true);
+        _withdraw(address(vlPenpie), _for, _amount);
     }
 
     function depositMPendleSVFor(
         uint256 _amount,
         address _for
-    ) external whenNotPaused _onlyMPendleSV() {
-        _deposit(address(mPendleSV), msg.sender,_for, _amount, true);
+    ) external nonReentrant whenNotPaused _onlyMPendleSV() {
+        _deposit(address(mPendleSV), msg.sender,_for, _amount);
     }
 
     function withdrawMPendleSVFor(
         uint256 _amount,
         address _for
-    ) external whenNotPaused _onlyMPendleSV() {
-        _withdraw(address(mPendleSV), _for, _amount, true);
+    ) external nonReentrant whenNotPaused _onlyMPendleSV() {
+        _withdraw(address(mPendleSV), _for, _amount);
     }    
 
     /* ============ Internal Functions ============ */
@@ -546,8 +600,7 @@ contract MasterPenpie is
         address _stakingToken,
         address _from,
         address _for,
-        uint256 _amount,
-        bool _isLock
+        uint256 _amount
     ) internal {
         PoolInfo storage pool = tokenToPoolInfo[_stakingToken];
         UserInfo storage user = userInfo[_stakingToken][_for];
@@ -556,21 +609,11 @@ contract MasterPenpie is
         _harvestRewards(_stakingToken, _for);
 
         user.amount = user.amount + _amount;
-        if (!_isLock) {
-            user.available = user.available + _amount;
-            IERC20(pool.stakingToken).safeTransferFrom(
-                address(_from),
-                address(this),
-                _amount
-            );
-        }
         user.rewardDebt = (user.amount * pool.accPenpiePerShare) / 1e12;
 
         if (_amount > 0) {
             pool.totalStaked += _amount;
-            if (!_isLock)
-                emit Deposit(_for, _stakingToken, pool.receiptToken, _amount);
-            else emit DepositNotAvailable(_for, _stakingToken, _amount);
+            emit DepositNotAvailable(_for, _stakingToken, _amount);
         }
     }
 
@@ -578,15 +621,12 @@ contract MasterPenpie is
     function _withdraw(
         address _stakingToken,
         address _account,
-        uint256 _amount,
-        bool _isLock
+        uint256 _amount
     ) internal {
         PoolInfo storage pool = tokenToPoolInfo[_stakingToken];
         UserInfo storage user = userInfo[_stakingToken][_account];
 
-        if (!_isLock && user.available < _amount)
-            revert WithdrawAmountExceedsStaked();
-        else if (user.amount < _amount && _isLock)
+        if (user.amount < _amount)
             revert UnlockAmountExceedsLocked();
 
         updatePool(_stakingToken);
@@ -594,15 +634,7 @@ contract MasterPenpie is
         _harvestBaseRewarder(_stakingToken, _account);
 
         user.amount = user.amount - _amount;
-        if (!_isLock) {
-            user.available = user.available - _amount;
-            IERC20(tokenToPoolInfo[_stakingToken].stakingToken).safeTransfer(
-                address(msg.sender),
-                _amount
-            );
-        }
         user.rewardDebt = (user.amount * pool.accPenpiePerShare) / 1e12;
-
         pool.totalStaked -= _amount;
 
         emit Withdraw(_account, _stakingToken, pool.receiptToken, _amount);
@@ -614,7 +646,7 @@ contract MasterPenpie is
         address _receiver,
         address[][] memory _rewardTokens,
         bool _withPnp
-    ) internal nonReentrant {
+    ) internal {
         uint256 length = _stakingTokens.length;
         if (length != _rewardTokens.length) revert LengthMismatch();
 
@@ -734,13 +766,24 @@ contract MasterPenpie is
             tokenToPoolInfo[_stakingToken].rewarder
         );
         if (address(rewarder) != address(0)) {
-            if (_rewardTokens.length > 0) {
-                rewarder.getRewards(_account, _receiver, _rewardTokens);
-                // if not specifiying any reward token, just claim them all
-            } else {
-                rewarder.getReward(_account, _receiver);
-            }
+            _getRewardsFromRewarder(rewarder, _account, _receiver, _rewardTokens);
         }
+
+        IBaseRewardPool legacyRewarder = IBaseRewardPool(legacyRewarders[_stakingToken]);
+        if (address(legacyRewarder) != address(0)) {
+           _getRewardsFromRewarder(legacyRewarder, _account, _receiver, _rewardTokens);
+        }
+    }
+
+    function _getRewardsFromRewarder(
+        IBaseRewardPool rewarder,
+        address _account,
+        address _receiver,
+        address[] memory _rewardTokens
+    ) internal {
+        if (_rewardTokens.length > 0)
+            rewarder.getRewards(_account, _receiver, _rewardTokens);
+        else rewarder.getReward(_account, _receiver);
     }
 
     /// only update the reward counting on in base rewarder but not sending them to user
@@ -751,7 +794,16 @@ contract MasterPenpie is
         IBaseRewardPool rewarder = IBaseRewardPool(
             tokenToPoolInfo[_stakingToken].rewarder
         );
+
+        if(address(ARBRewarder) != address(0) && address(rewarder) != address(0))
+            IARBRewarder(ARBRewarder).harvestARB(_stakingToken, address(rewarder));
+            
         if (address(rewarder) != address(0)) rewarder.updateFor(_account);
+
+        IBaseRewardPool legacyRewarder = IBaseRewardPool(legacyRewarders[_stakingToken]);
+        if (address(legacyRewarder) != address(0))
+            legacyRewarder.updateFor(_account);
+
     }
 
     function _sendPenpieForVlPenpiePool(
@@ -793,12 +845,17 @@ contract MasterPenpie is
 
         if (
             !Address.isContract(address(_rewarder)) &&
-            address(_rewarder) != address(0)
+            address(_rewarder) != address(0)    
         ) revert MustBeContractOrZero();
 
         if (tokenToPoolInfo[_stakingToken].isActive) revert PoolExisted();
 
-        massUpdatePools();
+        if (receiptToStakeToken[_receiptToken] != address(0)) revert ReceiptTokenAlreadyOccupied();
+        
+        if (_allocPoint != 0){
+            massUpdatePools();
+        }
+
         uint256 lastRewardTimestamp = block.timestamp > startTimestamp
             ? block.timestamp
             : startTimestamp;
@@ -848,6 +905,21 @@ contract MasterPenpie is
         emit PenpieOFTSet(_penpieOFT);
     }
 
+    function updateAllowedPauser(address _pauser, bool _allowed) external onlyOwner {
+        allowedPauser[_pauser] = _allowed;
+
+        emit UpdatePauserStatus(_pauser, _allowed);
+    }
+
+    function setCompounder(address _compounder)
+        external
+        onlyOwner
+    {
+        address oldCompounder = compounder;
+        compounder = _compounder;
+        emit CompounderUpdated(compounder, oldCompounder);
+    }
+
     function setVlPenpie(address _vlPenpie) external onlyOwner {
         address oldvlPenpie = address(vlPenpie);
         vlPenpie = IVLPenpie(_vlPenpie);
@@ -866,7 +938,7 @@ contract MasterPenpie is
     /**
      * @dev pause pool, restricting certain operations
      */
-    function pause() external onlyOwner {
+    function pause() external onlyPauser {
         _pause();
     }
 
@@ -885,13 +957,14 @@ contract MasterPenpie is
         address _receiptToken,
         address mainRewardToken
     ) external _onlyPoolManager returns (address) {
-        BaseRewardPoolV2 _rewarder = new BaseRewardPoolV2(
+        address rewarder = ERC20FactoryLib.createRewarder(
             _receiptToken,
             mainRewardToken,
             address(this),
             msg.sender
         );
-        return address(_rewarder);
+
+        return rewarder;
     }
 
     /// @notice Add a new penlde marekt pool. Explicitly for Pendle Market pools and should be called from Pendle Staking.
@@ -940,7 +1013,8 @@ contract MasterPenpie is
     function set(
         address _stakingToken,
         uint256 _allocPoint,
-        address _rewarder
+        address _rewarder,
+        bool _isActive
     ) external _onlyPoolManager {
         if (
             !Address.isContract(address(_rewarder)) &&
@@ -949,7 +1023,8 @@ contract MasterPenpie is
 
         if (!tokenToPoolInfo[_stakingToken].isActive) revert OnlyActivePool();
 
-        massUpdatePools();
+        // massUpdatePools();
+        updatePool(_stakingToken);
 
         totalAllocPoint =
             totalAllocPoint -
@@ -958,12 +1033,35 @@ contract MasterPenpie is
 
         tokenToPoolInfo[_stakingToken].allocPoint = _allocPoint;
         tokenToPoolInfo[_stakingToken].rewarder = _rewarder;
+        tokenToPoolInfo[_stakingToken].isActive = _isActive;
 
         emit Set(
             _stakingToken,
             _allocPoint,
-            IBaseRewardPool(tokenToPoolInfo[_stakingToken].rewarder)
+            IBaseRewardPool(tokenToPoolInfo[_stakingToken].rewarder),
+            _isActive
         );
+    }
+
+    //  This function is only for removing malicious pool in this incident, once clean up, this function shall be deleted
+    function removePool(address _stakingToken) external _onlyPoolManager {
+        totalAllocPoint = totalAllocPoint - tokenToPoolInfo[_stakingToken].allocPoint;
+
+        delete receiptToStakeToken[tokenToPoolInfo[_stakingToken].receiptToken];
+        delete tokenToPoolInfo[_stakingToken];
+
+        uint256 length = registeredToken.length;
+        for (uint i = length; i > 0; i--) {
+            if (registeredToken[i-1] == _stakingToken) {
+                if ((i - 1) != (length - 1)) {
+                    registeredToken[i - 1] = registeredToken[length - 1];
+                }
+                registeredToken.pop();
+                break;
+            }
+        }
+
+        emit PoolRemoved(_stakingToken);
     }
 
     /// @notice Update the emission rate of Penpie for MasterMagpie
@@ -980,12 +1078,14 @@ contract MasterPenpie is
         address[] calldata _stakingTokens,
         uint256[] calldata _allocPoints
     ) external _onlyWhiteListed {
-        massUpdatePools();
+        // massUpdatePools();
 
         if (_stakingTokens.length != _allocPoints.length)
             revert LengthMismatch();
 
         for (uint256 i = 0; i < _stakingTokens.length; i++) {
+            updatePool(_stakingTokens[i]);
+
             uint256 oldAllocPoint = tokenToPoolInfo[_stakingTokens[i]]
                 .allocPoint;
 
@@ -1006,6 +1106,8 @@ contract MasterPenpie is
         bool _allowed
     ) external onlyOwner {
         AllocationManagers[_account] = _allowed;
+
+        emit UpdateWhiteListedAllocManager(_account, _allowed);
     }
 
     function updateRewarderQueuer(
@@ -1016,4 +1118,30 @@ contract MasterPenpie is
         IBaseRewardPool rewarder = IBaseRewardPool(_rewarder);
         rewarder.updateRewardQueuer(_manager, _allowed);
     }
+
+    function setARBRewarder(address _ARBRewarder) external onlyOwner{
+        address oldARBRewarder = ARBRewarder;
+        ARBRewarder = _ARBRewarder;
+        IARBRewarder(ARBRewarder).massUpdatePools();
+
+        emit ARBRewarderSet(oldARBRewarder, ARBRewarder);
+    }
+
+    function setLegacyRewarder(address _stakingToken, address _legacyRewarder) external onlyOwner {
+        legacyRewarders[_stakingToken] = _legacyRewarder;
+        emit LegacyRewarderSet(_stakingToken, _legacyRewarder);
+    }
+
+    function setARBRewarderAsQueuer(address[] calldata _pools) external onlyOwner {
+
+        for(uint256 index = 0; index < _pools.length; index++){
+            address _stakingToken = _pools[index];
+            address rewarder = tokenToPoolInfo[_stakingToken].rewarder;
+            if(rewarder != address(0)){
+                IBaseRewardPool(rewarder).updateRewardQueuer(ARBRewarder, true);
+                emit ARBRewarderSetAsQueuer(rewarder);
+            }
+        }
+    }
+
 }

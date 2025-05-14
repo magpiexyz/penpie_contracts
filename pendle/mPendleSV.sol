@@ -17,7 +17,7 @@ import "../interfaces/IMasterPenpie.sol";
 import "../interfaces/ILocker.sol";
 
 /// @title mPendle Stability Vault
-/// @notice mPendle is designed for Locking mPendle tokens and earn higher rewards than regular mPendle stacking
+/// @notice mPendle is designed for Locking mPendle tokens and earn higher rewards than regular mPendle staking
 /// @author Magpie Team
 
 contract mPendleSV is ILocker, Initializable, ERC20Upgradeable, OwnableUpgradeable, PausableUpgradeable, ReentrancyGuardUpgradeable {
@@ -41,6 +41,8 @@ contract mPendleSV is ILocker, Initializable, ERC20Upgradeable, OwnableUpgradeab
     uint256 public totalPenalty;
     uint256 private totalAmount;
 
+    uint256 public reLockTimeLimitInSecs;
+
     /* ============ Errors ============ */
 
     error MaxSlotShouldNotZero();
@@ -56,6 +58,9 @@ contract mPendleSV is ILocker, Initializable, ERC20Upgradeable, OwnableUpgradeab
     error AllUnlockSlotOccupied();
     error InvalidAddress();
     error InvalidCoolDownPeriod();
+    error TooEarlyRelock();
+    error InvalidArrayLength();
+    error InvalidRewardablePercent();
 
     /* ============ Events ============ */
 
@@ -74,6 +79,7 @@ contract mPendleSV is ILocker, Initializable, ERC20Upgradeable, OwnableUpgradeab
     event ForceUnLock(address indexed user, uint256 slotIdx, uint256 mPendleAmount, uint256 penaltyAmount);
     event PenaltyDestinationUpdated(address penaltyDestination);
     event PenaltySentTo(address penaltyDestination, uint256 amount);
+    event RelockTimeLimitUpdated(uint256 _reLockTimeLimit);
 
     constructor() {
         _disableInitializers();
@@ -104,12 +110,13 @@ contract mPendleSV is ILocker, Initializable, ERC20Upgradeable, OwnableUpgradeab
     }
 
     function balanceOf(address _user) public override view returns (uint256) {
-        return getUserTotalLocked(_user) + getUserAmountInCoolDown(_user);
+        (uint256 _amountInMasterPenpie, ) = IMasterPenpie(masterPenpie).stakingInfo(address(this), _user);
+        return _amountInMasterPenpie;
     }
 
     // total mPendle locked, excluding the ones in cool down
     function totalLocked() override public view returns (uint256) {
-        return this.totalSupply() - this.totalAmountInCoolDown();
+        return totalSupply() - totalAmountInCoolDown;
     }
 
     /// @notice Get the total mPendle a user locked, not counting the ones in cool down
@@ -206,6 +213,8 @@ contract mPendleSV is ILocker, Initializable, ERC20Upgradeable, OwnableUpgradeab
 
             }
         }
+
+        if (percent > 1e18) revert InvalidRewardablePercent();
 
         return percent;
     }
@@ -307,7 +316,7 @@ contract mPendleSV is ILocker, Initializable, ERC20Upgradeable, OwnableUpgradeab
         emit Unlock(msg.sender, block.timestamp, unlockedAmount);
     }
 
-    function cancelUnlock(uint256 _slotIndex) external override whenNotPaused {
+    function cancelUnlock(uint256 _slotIndex) external override nonReentrant whenNotPaused {
         _checkIdexInBoundary(msg.sender, _slotIndex);
         UserUnlocking storage slot = userUnlockings[msg.sender][_slotIndex];
 
@@ -317,6 +326,34 @@ contract mPendleSV is ILocker, Initializable, ERC20Upgradeable, OwnableUpgradeab
         slot.amountInCoolDown = 0; // not in cool down anymore
 
         emit ReLock(msg.sender, _slotIndex, slot.amountInCoolDown);
+    }
+
+    function relock( address[] memory _users, uint256[][] memory _slotIndex) external nonReentrant whenNotPaused {
+        uint256 usersLength = _users.length;
+
+        if(usersLength != _slotIndex.length)
+            revert InvalidArrayLength();
+
+        for(uint256 i = 0; i < usersLength; i++)
+        {
+            for(uint256 j = 0; j < _slotIndex[i].length; j++)
+            {
+                uint256 currentSlotIndex = _slotIndex[i][j];
+                _checkIdexInBoundary(_users[i], currentSlotIndex);
+            
+                UserUnlocking storage slot = userUnlockings[_users[i]][currentSlotIndex];
+                if (slot.amountInCoolDown == 0) revert UnlockedAlready();
+
+                uint256 amountForReLock = slot.amountInCoolDown;
+
+                if ((slot.endTime + reLockTimeLimitInSecs) > block.timestamp) revert TooEarlyRelock();
+
+                totalAmountInCoolDown -= amountForReLock;
+                slot.amountInCoolDown = 0; // not in cool down anymore that mean it's on lock state
+
+                emit ReLock(_users[i], currentSlotIndex, amountForReLock);
+            }
+        }
     }
 
     /* ============ Admin Functions ============ */
@@ -345,6 +382,12 @@ contract mPendleSV is ILocker, Initializable, ERC20Upgradeable, OwnableUpgradeab
         maxSlot = _maxSlots;
 
         emit MaxSlotUpdated(maxSlot);
+    }
+
+    function setRelockTimeLimit(uint256 _reLockTimeLimitInSec) external onlyOwner {
+        reLockTimeLimitInSecs = _reLockTimeLimitInSec;
+
+        emit RelockTimeLimitUpdated(_reLockTimeLimitInSec);
     }
 
     /* ============ Internal Functions ============ */

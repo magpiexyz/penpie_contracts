@@ -11,6 +11,8 @@ interface IPenpieBribeManagerReader {
         uint256 _amount;
     } 
     function getBribesInAllPools(uint256 _epoch) external view returns (IBribe[][] memory);
+    function getBribesInAllPoolsForVePendle(uint256 _epoch) external view returns (IBribe[][] memory);
     function exactCurrentEpoch() external view returns(uint256);
     function getApprovedTokens() external view returns(address[] memory);
+    function getPoolLength() external view returns(uint256);
 }

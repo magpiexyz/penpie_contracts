@@ -37,6 +37,8 @@ abstract contract mPendleConvertorBaseUpg is
 
     address public mPendleSV;
 
+    mapping(address => bool) public allowedOperator;
+
     /* ============ Events ============ */
 
     event mPendleConverted(address indexed user, uint256 amount, uint256 mode);
@@ -44,13 +46,23 @@ abstract contract mPendleConvertorBaseUpg is
     event PendleConverted(uint256 _pendleAmount, uint256 _vePendleAmount);
     event PendleWithdrawToAdmin(address indexed user, uint256 amount);
     event mPendleSVUpdated(address indexed _mPendleSV);
+    event UpdateOperatorStatus(address indexed _user, bool _status);
 
     /* ============ Errors ============ */
 
+    error OnlyOperator();
     error MasterPenpieNotSet();
     error PendleStakingNotSet();
     error AddressZero();
     error MPendleSVNotSet();
+
+
+    /* ============ Modifiers ============ */
+
+    modifier onlyOperator() {
+        if (!allowedOperator[msg.sender]) revert OnlyOperator();
+        _;
+    }
 
     /* ============ External Functions ============ */
 
@@ -108,5 +120,11 @@ abstract contract mPendleConvertorBaseUpg is
         mPendleSV = _mPendleSV;
 
         emit mPendleSVUpdated(_mPendleSV);
+    }
+
+    function updateAllowedOperator(address _user, bool _allowed) external onlyOwner {
+        allowedOperator[_user] = _allowed;
+
+        emit UpdateOperatorStatus(_user, _allowed);
     }
 }

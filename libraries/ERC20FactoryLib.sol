@@ -5,6 +5,7 @@ pragma experimental ABIEncoderV2;
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { MintableERC20 } from "./MintableERC20.sol";
 import { PenpieReceiptToken } from "../rewards/PenpieReceiptToken.sol";
+import { BaseRewardPoolV2 } from "../rewards/BaseRewardPoolV2.sol";
 
 library ERC20FactoryLib {
     function createERC20(string memory name_, string memory symbol_) public returns(address) 
@@ -18,4 +19,19 @@ library ERC20FactoryLib {
         ERC20 token = new PenpieReceiptToken(_stakeToken, _masterPenpie, _name, _symbol);
         return address(token);
     }
+
+    function createRewarder(
+        address _receiptToken,
+        address mainRewardToken,
+        address _masterRadpie,
+        address _rewardQueuer
+    ) external returns (address) {
+        BaseRewardPoolV2 _rewarder = new BaseRewardPoolV2(
+            _receiptToken,
+            mainRewardToken,
+            _masterRadpie,
+            _rewardQueuer
+        );
+        return address(_rewarder);
+    }    
 }

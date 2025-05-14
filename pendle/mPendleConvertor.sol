@@ -38,8 +38,8 @@ contract mPendleConvertor is Initializable, mPendleConvertorBaseUpg {
     // only for mainChain
     function lockAllPendle(
         uint256[] calldata chainId
-    ) external payable onlyOwner {
-        if(pendleStaking == address(0)) revert PendleStakingNotSet();
+    ) external payable onlyOperator {
+        
         uint256 allPendle = IERC20(pendle).balanceOf(address(this));
 
         IERC20(pendle).safeApprove(pendleStaking, allPendle);

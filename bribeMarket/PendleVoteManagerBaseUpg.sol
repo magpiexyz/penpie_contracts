@@ -17,15 +17,10 @@ import "../interfaces/IVLPenpie.sol";
 import "../interfaces/IPenpieBribeManager.sol";
 
 /// @title PendleVoteManager Base contract, which include common functions for pendle voter on Ethereum and side chains
-/// @notice Pendle Vote manager is designed with cross chain implication. vePendle only lives on main chain, but vlPNP which controls 
-///         Penpie's vePendle voting power live on both Ethereum and Arbitrum, vlPNP voting status has to be cast back to Ethereum from Arbitrum.
+/// @notice Pendle Vote manager is designed for vlPNP holder to vote for Pendle emission for Pendle Markets
 ///         
 ///         Bribe is designed as only lives on 1 chain, determined by which chain the corresponding liqudity is host on Pendle, for example, bribe for 
 ///         GLP will be on Arbitrum while bribe for anrkETH, stETH will be on Ethereum.
-///
-///         The market information PoolInfos stored HAS TO BE exact the same across all chains, except the bribe only lives on the chain
-///         Where the underlying liquidity on pendle (ex: on arb for GLP, on eth for anrkETH) is host. The bribe address should be zero if for chains
-///         That underlying liquidity is not on that chain. (ex: GLP will have pool on both Arbitrum and Ethereum, but arb pool will have bribe while eth pool bribe address should be zero)
 ///
 /// @author Penpie Team
 abstract contract PendleVoteManagerBaseUpg is NonblockingLzAppUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
@@ -66,7 +61,10 @@ abstract contract PendleVoteManagerBaseUpg is NonblockingLzAppUpgradeable, Reent
     uint256 public totalVlPenpieInVote;
     uint256 public lastCastTime;
 
-    uint256[50] private __gap;
+    /* ===== 1st upgrade ===== */
+    mapping(address => bool) public allowedOperator;
+
+    uint256[49] private __gap;
 
     /* ============ Events ============ */
 
@@ -74,14 +72,21 @@ abstract contract PendleVoteManagerBaseUpg is NonblockingLzAppUpgradeable, Reent
     event DeactivatePool(address indexed market, uint256 _pid);
     event VoteCasted(address indexed caster, uint256 timestamp);
     event Voted(uint256 indexed _epoch, address indexed _user, address _market, uint256 indexed _pid, int256 _weight);
+    event UpdateOperatorStatus(address indexed _user, bool _status);
+    event BribeManagerSet(address indexed _bribeManager);
+    event UpdatePool(uint256 _pid, uint256 _chainId, address indexed _market, bool _isActive);
+    event MarketPIDForceSet(address indexed _market, uint256 _pid);
 
     /* ============ Errors ============ */
 
     error PoolNotActive();
     error NotEnoughVote();
     error OutOfPoolIndex();
-    error ZeroAddressError();     
-    error OnlyBribeManager();                                                                  
+    error ZeroAddressError();
+    error OnlyBribeManager();
+    error OnlyOperator();
+    error NotUse();
+    error InvalidPool();    
 
     /* ============ Constructor ============ */
 
@@ -92,9 +97,16 @@ abstract contract PendleVoteManagerBaseUpg is NonblockingLzAppUpgradeable, Reent
         pendleStaking = _pendleStaking;
         vlPenpie = _vlPenpie;
     }
+
+    /* ============ Modifiers ============ */
     
     modifier onlyBribeManager() {
         if (msg.sender != bribeManager) revert OnlyBribeManager();
+        _;
+    }
+
+    modifier onlyOperator() {
+        if (!allowedOperator[msg.sender]) revert OnlyOperator();
         _;
     }
 
@@ -132,41 +144,6 @@ abstract contract PendleVoteManagerBaseUpg is NonblockingLzAppUpgradeable, Reent
             Pool storage pool = poolInfos[_pids[i]];
             vlPenpieVotes[i] = pool.totalVoteInVlPenpie;
         }
-    }
-
-    /* ============ External Getters For cross chain ============ */
-
-    function estimateVoteFee(uint16 _dstChainId, address _user, UserVote[] memory _userVotes, bool _payInZRO, bytes calldata _adapterParam) public view returns (uint nativeFee, uint zroFee) {
-        
-        return lzEndpoint.estimateFees(_dstChainId, _user, encodeVote(_user, _userVotes), _payInZRO, _adapterParam);
-    }
-
-    function encodeVote(address user, UserVote[] memory userVotes) public pure returns (bytes memory) {
-        bytes memory buffer = abi.encodePacked(user, uint16(userVotes.length));
-        
-        for(uint i = 0; i < userVotes.length; i++) {
-            buffer = abi.encodePacked(buffer, userVotes[i].pid, userVotes[i].weight);
-        }
-        
-        return buffer;
-    }
-
-    function decodeVote(bytes memory data) public pure returns (address user, UserVote[] memory userVotes) {
-        uint256 offset = 0;
-        user = _readAddress(data, offset);
-        offset += 20;
-        uint256 userVotesLength = uint256(_readUint16(data, offset));
-        offset += 2;
-        userVotes = new UserVote[](userVotesLength);
-        for(uint i = 0; i < userVotesLength; i++) {
-            UserVote memory uv;
-            uv.pid = _readUint16(data, offset);
-            offset += 2;
-            uv.weight = int256(_readInt256(data, offset));
-            offset += 32;
-            userVotes[i] = uv;
-        }
-        return (user, userVotes);
     }
 
     /* ============ External Functions ============ */
@@ -220,26 +197,6 @@ abstract contract PendleVoteManagerBaseUpg is NonblockingLzAppUpgradeable, Reent
         emit Voted(epoch, _user, _market, _pid, _weight);
     }
 
-    function _readAddress(bytes memory data, uint256 offset) private pure returns (address result) {
-        uint160 num = 0;
-        for (uint i = 0; i < 20; i++) {
-            num |= uint160(uint256(uint8(data[offset + i]))) << (8 * (19 - i));
-        }
-        return address(num);
-    }
-
-    function _readUint16(bytes memory data, uint256 offset) private pure returns (uint16 result) {
-        for (uint i = 0; i < 2; i++) {
-            result |= uint16(uint256(uint8(data[offset + i])) << (8 * (1 - i)));
-        }
-    }
-
-    function _readInt256(bytes memory data, uint256 offset) private pure returns (int256 result) {
-        for (uint i = 0; i < 32; i++) {
-            result |= int256(uint256(uint8(data[offset + i])) << (8 * (31 - i)));
-        }
-    }    
-
     /* ============ Admin Functions ============ */
 
 	function pause() public onlyOwner {
@@ -252,11 +209,12 @@ abstract contract PendleVoteManagerBaseUpg is NonblockingLzAppUpgradeable, Reent
 
     function setBribeManager(address _bribeManager) external onlyOwner {
         bribeManager = _bribeManager;
+        emit BribeManagerSet(_bribeManager);
     }
 
     function addPool(
         address _market,
-        uint16 _chainId
+        uint256  _chainId
     ) external onlyBribeManager {
         if (_market == address(0)) revert ZeroAddressError();
         Pool memory pool = Pool({
@@ -280,18 +238,27 @@ abstract contract PendleVoteManagerBaseUpg is NonblockingLzAppUpgradeable, Reent
     }
 
     function updatePool(uint256 _pid, uint256 _chainId, address _market, bool _active) external onlyOwner {
+        if (_pid >= poolInfos.length) revert InvalidPool();
         Pool storage pool = poolInfos[_pid];
         pool.market = _market;
         pool.chainId = _chainId;
         pool.isActive = _active;
+        emit UpdatePool(_pid, _chainId, _market, _active);
     }
 
     function forceSetMarketPID(address _market, uint256 _newPid) external onlyOwner {
         marketToPid[_market] = _newPid;
+        emit MarketPIDForceSet(_market, _newPid);
     }
 
     function forcePopLastPool() external onlyOwner {
         if (poolInfos.length == 0) revert OutOfPoolIndex();
         poolInfos.pop();
+    }
+
+    function updateAllowedOperator(address _user, bool _allowed) external onlyOwner {
+        allowedOperator[_user] = _allowed;
+
+        emit UpdateOperatorStatus(_user, _allowed);
     }
 }

@@ -236,9 +236,9 @@ contract vlPenpieBaseRewarder is
         }
 
         for (uint256 i = rewardTokens.length; i < rewardTokensLength; i++) {
-            bonusTokenAddresses[i] = claimable[i].token;
+            bonusTokenAddresses[i] = claimable[i - rewardTokens.length].token;
             bonusTokenSymbols[i] = IERC20Metadata(
-                address(claimable[i].token)
+                address(claimable[i - rewardTokens.length].token)
             ).symbol();
         }
     }    
@@ -298,14 +298,14 @@ contract vlPenpieBaseRewarder is
 
     /// @notice Updates the reward information for one account
     /// @param _account Address account
-    function updateFor(address _account) external override {
+    function updateFor(address _account) external override nonReentrant {
         _updateFor(_account);
     }
 
     function getReward(
         address _account,
         address _receiver
-    ) public onlymasterPenpie updateReward(_account) returns (bool) {
+    ) public onlymasterPenpie nonReentrant updateReward(_account) returns (bool) {
         uint256 length = rewardTokens.length;
 
         for (uint256 index = 0; index < length; ++index) {
@@ -333,48 +333,6 @@ contract vlPenpieBaseRewarder is
             _sendReward(rewardToken, _account, _receiver);
         }
     }
-
-    function getRewardWithBribe(
-        address _account,
-        address _receiver,
-        IBribeRewardDistributor.Claim[] calldata _proof
-    ) public onlymasterPenpie updateReward(_account) returns (bool) {
-        uint256 length = rewardTokens.length;
-
-        for (uint256 index = 0; index < length; ++index) {
-            address rewardToken = rewardTokens[index];
-            _sendReward(rewardToken, _account, _receiver);
-        }
-
-        if(_proof.length > 0) {
-            bribeRewardDistributor.claim(_proof);
-        }
-
-        return true;
-    }
-
-    function getRewardsWithBribe(
-        address _account,
-        address _receiver,
-        address[] memory _rewardTokens,
-        IBribeRewardDistributor.Claim[] calldata _proof
-    )
-        public
-        onlymasterPenpie
-        updateRewards(_account, _rewardTokens)
-        nonReentrant
-    {
-        uint256 length = _rewardTokens.length;
-
-        for (uint256 index = 0; index < length; ++index) {
-            address rewardToken = _rewardTokens[index];
-            _sendReward(rewardToken, _account, _receiver);
-        }
-
-        if(_proof.length > 0) {
-            bribeRewardDistributor.claim(_proof);
-        }
-    }    
 
     function getRewardLength() external view returns (uint256) {
         return rewardTokens.length;
@@ -432,7 +390,7 @@ contract vlPenpieBaseRewarder is
     function queueNewRewards(
         uint256 _amountReward,
         address _rewardToken
-    ) external override onlyManager returns (bool) {
+    ) external override nonReentrant onlyManager returns (bool) {
         if (!isRewardToken[_rewardToken]) {
             rewardTokens.push(_rewardToken);
             isRewardToken[_rewardToken] = true;
@@ -553,7 +511,6 @@ contract vlPenpieBaseRewarder is
         if (forfeitAmount < (_amount / 1000)) {
             // if forfeitAmount is smaller than 0.1% ignore to save gas fee
             forfeitAmount = 0;
-            rewardableAmount = _amount;
         }
 
         return forfeitAmount;

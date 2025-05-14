@@ -22,24 +22,11 @@ interface IVLPenpieBaseRewarder is IBaseRewardPool {
     
     function allEarned(address _account) external view
         returns (uint256[] memory pendingBonusRewards);
-
-    function getRewardWithBribe(
-        address _account,
-        address _receiver,
-        IBribeRewardDistributor.Claim[] calldata _proof
-    ) external returns (bool);
     
     function getReward(
         address _account,
         address _receiver
     ) external returns (bool);
-
-    function getRewardsWithBribe(
-        address _account,
-        address _receiver,
-        address[] memory _rewardTokens,
-        IBribeRewardDistributor.Claim[] calldata _proof
-    ) external;
     
     function queuePenpie(uint256 _amount, address _user, address _receiver) external returns(bool);
 }

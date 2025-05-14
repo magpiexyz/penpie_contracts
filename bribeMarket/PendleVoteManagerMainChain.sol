@@ -14,13 +14,6 @@ import "../interfaces/IVLPenpie.sol";
 import "../interfaces/pendle/IPVoteController.sol";
 
 /// @title PendleVoteManagerMainChain (for Ethereum where vePendle lives)
-/// @notice PendleVoteManagerMainChain on Ethereum will store all voting information, which should be aggregated one vote cast from PendleVoteManagerSideChain (remote chain .
-///         So the voting information here represents penpie's all voting information.
-///
-///         PendleVoteManagerSideChain acts like a delegated vote which stores only voting information on that chain, and will have to cast to PendleVoteManageMainChain on Ethereum
-///         then later to be casted to Pendle.
-///
-///         VoteManagerSubChain --(cross chain cast vote)--> VoteManagerMainChain --(cast vote)--> Pendle
 /// @author Magpie Team
 
 contract PendleVoteManagerMainChain is PendleVoteManagerBaseUpg {
@@ -35,7 +28,7 @@ contract PendleVoteManagerMainChain is PendleVoteManagerBaseUpg {
     IPVoteController public voter; // Pendle voter interface
     IPVotingEscrowMainchain public vePendle; //main contract interact with from pendle side
 
-    mapping(address => bool) remotePendleVoter; // to stored address of remote vote manager.
+    mapping(address => bool) remotePendleVoter; // for cross chain, but not in used anymore as we use off chain aggregation now
 
     /* ============ Events ============ */
 
@@ -107,39 +100,14 @@ contract PendleVoteManagerMainChain is PendleVoteManagerBaseUpg {
 
     /// @notice cast all pending votes
     /// @notice we're casting weights to Pendle Finance
-    function castVotes() external nonReentrant whenNotPaused {
+    function manualVote(
+        address[] calldata _pools,
+        uint64[] calldata _weights
+    ) external nonReentrant onlyOperator {
         lastCastTime = block.timestamp;
-        uint256 length = poolInfos.length;
-
-        address[] memory _pools = new address[](length);
-        uint64[] memory votes = new uint64[](length);
-
-        if (totalVlPenpieInVote > 0) {
-            uint256 totalVlPnpInVote = 0;
-            for (uint256 i; i < length; i++) {
-                Pool storage pool = poolInfos[i];
-                _pools[i] = pool.market;
-
-                if (!pool.isActive) continue;
-                
-                totalVlPnpInVote += pool.totalVoteInVlPenpie;
-            }
-
-            for (uint256 i; i < length; i++) {
-                Pool storage pool = poolInfos[i];
-                _pools[i] = pool.market;
-
-                if (!pool.isActive) continue;
-                
-                votes[i] = SafeCast.toUint64(pool.totalVoteInVlPenpie * PENDLE_USER_VOTE_MAX_WEIGHT / totalVlPnpInVote);
-            }
-        }
-        
-        IPendleStaking(pendleStaking).vote(_pools, votes);
+        IPendleStaking(pendleStaking).vote(_pools, _weights);
         emit VoteCasted(msg.sender, lastCastTime);
     }
-
-    /* ============ Internal Functions ============ */
 
     /* ============ layerzero Functions ============ */
 
@@ -149,16 +117,7 @@ contract PendleVoteManagerMainChain is PendleVoteManagerBaseUpg {
         uint64 _nonce,
         bytes memory _payload
     ) internal override {
-        (address user, UserVote[] memory userVotes) = decodeVote(_payload);
-
-        emit ReceiveRemoteCast(remotePendleVoter[user]);
-
-        if (remotePendleVoter[user])
-            _recCast(user, userVotes);
-    }
-
-    function _recCast(address _user, UserVote[] memory _userVotes) internal {
-        _updateVoteAndCheck(_user, _userVotes);
+        revert NotUse();
     }
 
     /* ============ Admin Functions ============ */

@@ -15,6 +15,7 @@ import { IPFeeDistributorV2 } from "../interfaces/pendle/IPFeeDistributorV2.sol"
 import { IPVoteController } from "../interfaces/pendle/IPVoteController.sol";
 import { IPendleRouter } from "../interfaces/pendle/IPendleRouter.sol";
 import { IMasterPenpie } from "../interfaces/IMasterPenpie.sol";
+import { IETHZapper } from "../interfaces/IETHZapper.sol";
 
 import "../interfaces/ISmartPendleConvert.sol";
 import "../interfaces/IBaseRewardPool.sol";
@@ -98,40 +99,42 @@ abstract contract PendleStakingBaseUpg is
     /* ===== 1st upgrade ===== */
     address public bribeManager;
     address public smartPendleConvert;
+    address public ETHZapper;
+    uint256 public harvestCallerPendleFee;
 
-    uint256[48] private __gap;
+    /* ===== 2nd upgrade ===== */
+    address public mgpBlackHole;
+    uint256 public mPendleBurnRatio;
+
+    /* ===== 3rd upgrade ===== */
+    address public pendleMarketRegisterHelper;
+
+    /* ===== 4th upgrade ===== */
+    mapping(address => uint256) public affectedMarketWithdrawRatio;
+    mapping(address => bool) public allowedPauser;
+
+    /* ===== 5th upgrade ===== */
+    mapping(address => bool) public ismPendleRewardMarket;
+
+    /* ===== 6th upgrade ===== */
+    mapping(address => bool) public nonHarvestablePools;
+
+    uint256[39] private __gap;
 
     /* ============ Events ============ */
 
     // Admin
     event PoolAdded(address _market, address _rewarder, address _receiptToken);
-    event PoolRemoved(uint256 _pid, address _lpToken);
+    event PoolRemoved(address indexed _market);
 
-    event SetMPendleConvertor(
-        address _oldmPendleConvertor,
-        address _newmPendleConvertor
-    );
+    event SetMPendleConvertor(address _oldmPendleConvertor, address _newmPendleConvertor);
+    event PendleMarketRegisterHelperSet(address _pendleMarketRegisterHelper);
 
     // Fee
-    event AddPendleFee(
-        address _to,
-        uint256 _value,
-        bool _isMPENDLE,
-        bool _isAddress
-    );
+    event AddPendleFee(address _to, uint256 _value, bool _isMPENDLE, bool _isAddress);
     event SetPendleFee(address _to, uint256 _value);
-    event RemovePendleFee(
-        uint256 value,
-        address to,
-        bool _isMPENDLE,
-        bool _isAddress
-    );
-    event RewardPaidTo(
-        address _market,
-        address _to,
-        address _rewardToken,
-        uint256 _feeAmount
-    );
+    event RemovePendleFee(uint256 value, address to, bool _isMPENDLE, bool _isAddress);
+    event RewardPaidTo(address _market, address _to, address _rewardToken, uint256 _feeAmount);
     event VePendleHarvested(
         uint256 _total,
         address[] _pool,
@@ -155,16 +158,13 @@ abstract contract PendleStakingBaseUpg is
         address indexed _receptToken,
         uint256 _receptAmount
     );
-    event PendleLocked(
-        uint256 _amount,
-        uint256 _lockDays,
-        uint256 _vePendleAccumulated
-    );
+    event PendleLocked(uint256 _amount, uint256 _lockDays, uint256 _vePendleAccumulated);
 
     // Vote Manager
     event VoteSet(
         address _voter,
         uint256 _vePendleHarvestCallerFee,
+        uint256 _harvestCallerPendleFee,
         uint256 _voteProtocolFee,
         address _voteFeeCollector
     );
@@ -172,14 +172,27 @@ abstract contract PendleStakingBaseUpg is
     event BribeManagerUpdated(address _oldBribeManager, address _bribeManager);
     event BribeManagerEOAUpdated(address _oldBribeManagerEOA, address _bribeManagerEOA);
 
-    event SmartPendleConvertUpdated(
-        address _OldSmartPendleConvert,
-        address _smartPendleConvert
-    );
+    event SmartPendleConvertUpdated(address _OldSmartPendleConvert, address _smartPendleConvert);
+
+    event PoolHelperUpdated(address _market);
+    event MgpBlackHoleSet(address indexed _mgpBlackHole, uint256 _mPendleBurnRatio);
+    event AffectedMarketWithdrawRatioSet(address indexed _market, uint256 _withdrawRatio);
+    event MPendleBurn(address indexed _mgpBlackHole, uint256 _burnAmount);
+    event EmergencyWithdraw(address indexed _for, uint256 _withdrawAmount);
+    event UpdatePauserStatus(address indexed _pauser, bool _allowed);
+    event UpdateMPendleRewardMarketStatus(address indexed _market, bool _allowed);
+    event UpdateNonHarvestableMarketStatus(address indexed _market, bool _allowed);
+    event MasterPenpieSet(address indexed _masterPenpie);
+    event MPendleOFTSet(address indexed _mPendleOFT);
+    event ETHZapperSet(address indexed _ETHZapper);
+    event MarketDepositHelperSet(address indexed _helper);
+    event HarvestTimeGapSet(uint256 _period);
+    event AutoBribeFeeSet(uint256 _autoBribeFee);
 
     /* ============ Errors ============ */
 
     error OnlyPoolHelper();
+    error OnlyPoolRegisterHelper();
     error OnlyActivePool();
     error PoolOccupied();
     error InvalidFee();
@@ -190,6 +203,11 @@ abstract contract PendleStakingBaseUpg is
     error InvalidFeeDestination();
     error ZeroNotAllowed();
     error InvalidAddress();
+    error OnlyPauser();
+    error InvalidWithdrawAmount();
+    error OnlyDeactivatePool();
+    error InvalidWithdrawRatio();
+    error InvalidIndex();
 
     /* ============ Constructor ============ */
 
@@ -200,7 +218,7 @@ abstract contract PendleStakingBaseUpg is
         address _distributorETH,
         address _pendleRouter,
         address _masterPenpie
-    ) public initializer {
+    ) public  onlyInitializing {
         __Ownable_init();
         __ReentrancyGuard_init();
         __Pausable_init();
@@ -213,13 +231,6 @@ abstract contract PendleStakingBaseUpg is
     }
 
     /* ============ Modifiers ============ */
-
-    modifier _onlyPoolHelper(address _market) {
-        Pool storage poolInfo = pools[_market];
-
-        if (msg.sender != poolInfo.helper) revert OnlyPoolHelper();
-        _;
-    }
 
     modifier _onlyActivePool(address _market) {
         Pool storage poolInfo = pools[_market];
@@ -236,6 +247,24 @@ abstract contract PendleStakingBaseUpg is
         _;
     }
 
+    modifier _onlyInactivePoolHelper(address _market) {
+        Pool storage poolInfo = pools[_market];
+
+        if (msg.sender != poolInfo.helper) revert OnlyPoolHelper();
+        if (poolInfo.isActive) revert OnlyDeactivatePool();
+        _;
+    }
+
+    modifier _onlyPoolRegisterHelper() {
+        if (msg.sender != pendleMarketRegisterHelper) revert OnlyPoolRegisterHelper();
+        _;
+    }
+
+    modifier onlyPauser() {
+        if (!allowedPauser[msg.sender]) revert OnlyPauser();
+        _;
+    }    
+
     /* ============ External Getters ============ */
 
     receive() external payable {
@@ -248,6 +277,10 @@ abstract contract PendleStakingBaseUpg is
         return IPVotingEscrowMainchain(vePendle).balanceOf(address(this));
     }
 
+    function getPoolLength() external view returns (uint256) {
+        return poolTokenList.length;
+    }
+
     /* ============ External Functions ============ */
 
     function depositMarket(
@@ -255,7 +288,7 @@ abstract contract PendleStakingBaseUpg is
         address _for,
         address _from,
         uint256 _amount
-    ) external override nonReentrant whenNotPaused _onlyPoolHelper(_market) {
+    ) external override nonReentrant whenNotPaused _onlyActivePoolHelper(_market) {
         Pool storage poolInfo = pools[_market];
         _harvestMarketRewards(poolInfo.market, false);
 
@@ -264,20 +297,14 @@ abstract contract PendleStakingBaseUpg is
         // mint the receipt to the user driectly
         IMintableERC20(poolInfo.receiptToken).mint(_for, _amount);
 
-        emit NewMarketDeposit(
-            _for,
-            _market,
-            _amount,
-            poolInfo.receiptToken,
-            _amount
-        );
+        emit NewMarketDeposit(_for, _market, _amount, poolInfo.receiptToken, _amount);
     }
 
     function withdrawMarket(
         address _market,
         address _for,
         uint256 _amount
-    ) external override nonReentrant whenNotPaused _onlyPoolHelper(_market) {
+    ) external override nonReentrant whenNotPaused _onlyActivePoolHelper(_market) {
         Pool storage poolInfo = pools[_market];
         _harvestMarketRewards(poolInfo.market, false);
 
@@ -285,30 +312,43 @@ abstract contract PendleStakingBaseUpg is
 
         IERC20(poolInfo.market).safeTransfer(_for, _amount);
         // emit New withdraw
-        emit NewMarketWithdraw(
-            _for,
-            _market,
-            _amount,
-            poolInfo.receiptToken,
-            _amount
-        );
+        emit NewMarketWithdraw(_for, _market, _amount, poolInfo.receiptToken, _amount);
     }
 
     /// @notice harvest a Rewards from Pendle Liquidity Pool
     /// @param _market Pendle Pool lp as helper identifier
     function harvestMarketReward(
-        address _market
-    ) external whenNotPaused _onlyActivePool(_market) {
-        _harvestMarketRewards(_market, true); // triggers harvest from Pendle finance
+        address _market,
+        address _caller,
+        uint256 _minEthRecive
+    ) external nonReentrant whenNotPaused {
+        address[] memory _markets = new address[](1);
+        _markets[0] = _market;
+        _harvestBatchMarketRewards(_markets, _caller, _minEthRecive); // triggers harvest from Pendle finance
     }
 
     function batchHarvestMarketRewards(
-        address[] calldata _markets
-    ) external whenNotPaused {
-        for (uint256 i = 0; i < _markets.length; i++) {
-            if (!pools[_markets[i]].isActive) revert OnlyActivePool();
-            _harvestMarketRewards(_markets[i], true);
-        }
+        address[] calldata _markets,
+        uint256 minEthToRecieve
+    ) external nonReentrant whenNotPaused {
+        _harvestBatchMarketRewards(_markets, msg.sender, minEthToRecieve);
+    }
+
+    function emergencyWithdraw(
+        address _market,
+        address _for,
+        uint256 _receiptAmount
+    ) external nonReentrant whenNotPaused _onlyInactivePoolHelper(_market) {
+        Pool storage poolInfo = pools[_market];
+        _harvestMarketRewards(poolInfo.market, false);
+        uint256 withdrawAmount = (_receiptAmount * affectedMarketWithdrawRatio[_market]) / DENOMINATOR;
+
+        if (withdrawAmount == 0) revert InvalidWithdrawAmount();
+
+        IMintableERC20(poolInfo.receiptToken).burn(_for, _receiptAmount);
+        IERC20(poolInfo.market).safeTransfer(_for, withdrawAmount);
+
+        emit EmergencyWithdraw(_for, withdrawAmount);
     }
 
     /* ============ Admin Functions ============ */
@@ -319,7 +359,7 @@ abstract contract PendleStakingBaseUpg is
         string memory name,
         string memory symbol
     ) external onlyOwner {
-        if (pools[_market].isActive != false) {
+        if (pools[_market].market != address(0)) {
             revert PoolOccupied();
         }
 
@@ -332,11 +372,7 @@ abstract contract PendleStakingBaseUpg is
             address(PENDLE)
         );
 
-        IPendleMarketDepositHelper(marketDepositHelper).setPoolInfo(
-            _market,
-            rewarder,
-            true
-        );
+        IPendleMarketDepositHelper(marketDepositHelper).setPoolInfo(_market, rewarder, true);
 
         IMasterPenpie(masterPenpie).add(
             _allocPoints,
@@ -358,6 +394,39 @@ abstract contract PendleStakingBaseUpg is
         emit PoolAdded(_market, address(rewarder), address(newToken));
     }
 
+    function updateAllowedPauser(address _pauser, bool _allowed) external onlyOwner {
+        allowedPauser[_pauser] = _allowed;
+
+        emit UpdatePauserStatus(_pauser, _allowed);
+    }
+
+    // This function is only for removing malicious pool in this incident, once clean up, this function shall be deleted
+    function batchRemovePools(address[] memory _addresses) nonReentrant onlyOwner external {
+        for (uint256 i = 0; i < _addresses.length; i++) {
+            _removePool(_addresses[i]);
+        }
+    }
+
+    function _removePool(address _market) internal {
+        uint256 length = poolTokenList.length;
+        for (uint i = length; i > 0; i--) {
+            if (poolTokenList[i-1] == _market) {
+                if ((i - 1) != (length - 1)) {
+                    poolTokenList[i - 1] = poolTokenList[length - 1];
+                }
+                poolTokenList.pop();
+                break;
+            }
+        }
+        
+        delete pools[_market];
+
+        IPendleMarketDepositHelper(marketDepositHelper).removePoolInfo(_market);
+        IMasterPenpie(masterPenpie).removePool(_market);
+
+        emit PoolRemoved(_market);
+    }
+
     /// @notice set the mPendleConvertor address
     /// @param _mPendleConvertor the mPendleConvertor address
     function setMPendleConvertor(address _mPendleConvertor) external onlyOwner {
@@ -374,6 +443,34 @@ abstract contract PendleStakingBaseUpg is
         emit VoteManagerUpdated(oldVoteManager, voteManager);
     }
 
+    function setAffectedMarketWithdrawRatio(address _market, uint256 _withdrawRatio) external onlyOwner {
+        if (_market == address(0)) revert InvalidAddress();
+        if(_withdrawRatio > DENOMINATOR) revert InvalidWithdrawRatio();
+
+        affectedMarketWithdrawRatio[_market] = _withdrawRatio;
+        emit AffectedMarketWithdrawRatioSet(_market, _withdrawRatio);
+    }
+
+    function setMGPBlackHole(address _mgpBlackHole, uint256 _mPendleBurnRatio) external onlyOwner {
+        if (_mgpBlackHole == address(0)) revert InvalidAddress();
+        require(_mPendleBurnRatio <= DENOMINATOR, "mPendle Burn Ratio cannot be greater than 100%.");
+        mgpBlackHole = _mgpBlackHole;
+        mPendleBurnRatio = _mPendleBurnRatio;
+        emit MgpBlackHoleSet(_mgpBlackHole, _mPendleBurnRatio);
+    }
+
+    function updateMPendleRewardMarket(address _market, bool _allowed) external onlyOwner {
+        ismPendleRewardMarket[_market] = _allowed;
+
+        emit UpdateMPendleRewardMarketStatus(_market, _allowed);
+    }
+
+    function updateNonHarvestableMarket(address _market, bool _allowed) external onlyOwner {
+        nonHarvestablePools[_market] = _allowed;
+
+        emit UpdateNonHarvestableMarketStatus(_market, _allowed);
+    }
+
     function setBribeManager(address _bribeManager, address _bribeManagerEOA) external onlyOwner {
         address oldBribeManager = bribeManager;
         bribeManager = _bribeManager;
@@ -387,23 +484,40 @@ abstract contract PendleStakingBaseUpg is
 
     function setmasterPenpie(address _masterPenpie) external onlyOwner {
         masterPenpie = _masterPenpie;
+
+        emit MasterPenpieSet(_masterPenpie);
+    }
+
+    function setPendleMarketRegisterHelper(address _pendleMarketRegisterHelper) external onlyOwner {
+        if (_pendleMarketRegisterHelper == address(0)) revert InvalidAddress();
+        pendleMarketRegisterHelper = _pendleMarketRegisterHelper;
+
+        emit PendleMarketRegisterHelperSet(_pendleMarketRegisterHelper);
     }
 
     function setMPendleOFT(address _setMPendleOFT) external onlyOwner {
         mPendleOFT = _setMPendleOFT;
+
+        emit MPendleOFTSet(_setMPendleOFT);
+    }
+
+    function setETHZapper(address _ETHZapper) external onlyOwner {
+        ETHZapper = _ETHZapper;
+
+        emit ETHZapperSet(_ETHZapper);
     }
 
     /**
      * @notice pause Pendle staking, restricting certain operations
      */
-    function pause() external nonReentrant onlyOwner {
+    function pause() external onlyPauser {
         _pause();
     }
 
     /**
      * @notice unpause Pendle staking, enabling certain operations
      */
-    function unpause() external nonReentrant onlyOwner {
+    function unpause() external onlyOwner {
         _unpause();
     }
 
@@ -452,6 +566,7 @@ abstract contract PendleStakingBaseUpg is
         bool _isActive
     ) external onlyOwner {
         if (_value >= DENOMINATOR) revert InvalidFee();
+        if (_index >= pendleFeeInfos.length) revert InvalidIndex();
 
         Fees storage fee = pendleFeeInfos[_index];
         fee.to = _to;
@@ -461,6 +576,7 @@ abstract contract PendleStakingBaseUpg is
 
         totalPendleFee = totalPendleFee - fee.value + _value;
         fee.value = _value;
+        if(totalPendleFee > DENOMINATOR) revert InvalidFee();
 
         emit SetPendleFee(fee.to, _value);
     }
@@ -468,6 +584,7 @@ abstract contract PendleStakingBaseUpg is
     /// @notice remove some fee
     /// @param _index the index of the fee in the fee list
     function removePendleFee(uint256 _index) external onlyOwner {
+        if (_index >= pendleFeeInfos.length) revert InvalidIndex();
         Fees memory feeToRemove = pendleFeeInfos[_index];
 
         for (uint i = _index; i < pendleFeeInfos.length - 1; i++) {
@@ -487,20 +604,24 @@ abstract contract PendleStakingBaseUpg is
     function setVote(
         address _pendleVote,
         uint256 _vePendleHarvestCallerFee,
+        uint256 _harvestCallerPendleFee,
         uint256 _protocolFee,
         address _feeCollector
     ) external onlyOwner {
-        if ((_vePendleHarvestCallerFee + _protocolFee) > DENOMINATOR)
-            revert InvalidFee();
+        if ((_vePendleHarvestCallerFee + _protocolFee) > DENOMINATOR) revert InvalidFee();
+
+        if ((_harvestCallerPendleFee + _protocolFee) > DENOMINATOR) revert InvalidFee();
 
         pendleVote = IPVoteController(_pendleVote);
         vePendleHarvestCallerFee = _vePendleHarvestCallerFee;
+        harvestCallerPendleFee = _harvestCallerPendleFee;
         protocolFee = _protocolFee;
         feeCollector = _feeCollector;
 
         emit VoteSet(
             _pendleVote,
             vePendleHarvestCallerFee,
+            harvestCallerPendleFee,
             protocolFee,
             feeCollector
         );
@@ -508,12 +629,16 @@ abstract contract PendleStakingBaseUpg is
 
     function setMarketDepositHelper(address _helper) external onlyOwner {
         marketDepositHelper = _helper;
+
+        emit MarketDepositHelperSet(_helper);
     }
 
     function setHarvestTimeGap(uint256 _period) external onlyOwner {
         if (_period > 4 hours) revert TimeGapTooMuch();
 
         harvestTimeGap = _period;
+
+        emit HarvestTimeGapSet(_period);
     }
 
     function setSmartConvert(address _smartPendleConvert) external onlyOwner {
@@ -521,45 +646,72 @@ abstract contract PendleStakingBaseUpg is
         address oldSmartPendleConvert = smartPendleConvert;
         smartPendleConvert = _smartPendleConvert;
 
-        emit SmartPendleConvertUpdated(
-            oldSmartPendleConvert,
-            smartPendleConvert
-        );
+        emit SmartPendleConvertUpdated(oldSmartPendleConvert, smartPendleConvert);
     }
 
-    function setAutoBribeFee(
-        uint256 _autoBribeFee
-    ) external onlyOwner {
+    function setAutoBribeFee(uint256 _autoBribeFee) external onlyOwner {
         if (_autoBribeFee > DENOMINATOR) revert InvalidFee();
         autoBribeFee = _autoBribeFee;
+
+        emit AutoBribeFeeSet(_autoBribeFee);
     }
 
-    function updateMarketRewards(
-        address _market,
-        uint256[] memory amounts
-    ) external onlyOwner {
+    function updateMarketRewards(address _market, uint256[] memory amounts) external onlyOwner {
         Pool storage poolInfo = pools[_market];
         address[] memory bonusTokens = IPendleMarket(_market).getRewardTokens();
         require(bonusTokens.length == amounts.length, "...");
+        if (nonHarvestablePools[_market]) return;
+
+        uint256 pendleBefore = IERC20(PENDLE).balanceOf(address(this));
+        uint256 pendleToSend;
         for (uint256 i; i < bonusTokens.length; i++) {
             if (bonusTokens[i] == NATIVE) bonusTokens[i] = address(WETH);
-            _sendRewards(
-                _market,
-                bonusTokens[i],
-                poolInfo.rewarder,
-                amounts[i]
-            );
+            uint256 leftAmounts = amounts[i];
+            if(bonusTokens[i] == PENDLE)
+                pendleToSend = amounts[i];
+            _sendRewards(_market, bonusTokens[i], poolInfo.rewarder, amounts[i], leftAmounts);
         }
+        // pendleToSend will always be > the pendle bal diff before and after
+        uint256 pendleForMPendleFee = pendleToSend - (pendleBefore - IERC20(PENDLE).balanceOf(address(this)));
+        _sendMPendleFees(pendleForMPendleFee);
+    }
+
+    function updatePoolHelper(
+        address _market,
+        address _helper,
+        bool _isActive,
+        uint256 _allocPoints
+    ) external onlyOwner {
+        if (_helper == address(0) || _market == address(0)) revert InvalidAddress();
+
+        Pool storage poolInfo = pools[_market];
+        poolInfo.helper = _helper;
+        poolInfo.isActive = _isActive;
+
+        IPendleMarketDepositHelper(_helper).setPoolInfo(
+            _market,
+            poolInfo.rewarder,
+            _isActive
+        );
+
+        IMasterPenpie(masterPenpie).set(
+            address(_market),
+            _allocPoints,
+            poolInfo.rewarder,
+            _isActive
+        );
+
+        emit PoolHelperUpdated(_market);
     }
 
     /* ============ Internal Functions ============ */
 
     function _harvestMarketRewards(address _market, bool _force) internal {
+        if (nonHarvestablePools[_market]) return;
+
         Pool storage poolInfo = pools[_market];
-        if (
-            !_force &&
-            (block.timestamp - poolInfo.lastHarvestTime) < harvestTimeGap
-        ) return;
+        if (!_force && (block.timestamp - poolInfo.lastHarvestTime) < harvestTimeGap) return;
+        uint256 pendleBefore = IERC20(PENDLE).balanceOf(address(this));
 
         poolInfo.lastHarvestTime = block.timestamp;
 
@@ -574,19 +726,138 @@ abstract contract PendleStakingBaseUpg is
         IPendleMarket(_market).redeemRewards(address(this));
 
         for (uint256 i; i < bonusTokens.length; i++) {
-            if (bonusTokens[i] == NATIVE) bonusTokens[i] = address(WETH);
-            uint256 amountAfter = IERC20(bonusTokens[i]).balanceOf(
-                address(this)
-            );
+            uint256 amountAfter = IERC20(bonusTokens[i]).balanceOf(address(this));
             uint256 bonusBalance = amountAfter - amountsBefore[i];
+            uint256 leftBonusBalance = bonusBalance;
             if (bonusBalance > 0) {
                 _sendRewards(
                     _market,
                     bonusTokens[i],
                     poolInfo.rewarder,
-                    bonusBalance
+                    bonusBalance,
+                    leftBonusBalance
                 );
             }
+        }
+
+        uint256 pendleForMPendleFee = IERC20(PENDLE).balanceOf(address(this)) - pendleBefore;
+        _sendMPendleFees(pendleForMPendleFee);
+    }
+
+    function _harvestBatchMarketRewards(
+        address[] memory _markets,
+        address _caller,
+        uint256 _minEthToRecieve
+    ) internal {
+        uint256 harvestCallerTotalPendleReward;
+        uint256 pendleBefore = IERC20(PENDLE).balanceOf(address(this));
+
+        for (uint256 i = 0; i < _markets.length; i++) {
+            if (!pools[_markets[i]].isActive) revert OnlyActivePool();
+            if (nonHarvestablePools[_markets[i]]) continue;
+
+            Pool storage poolInfo = pools[_markets[i]];
+
+            poolInfo.lastHarvestTime = block.timestamp;
+
+            address[] memory bonusTokens = IPendleMarket(_markets[i]).getRewardTokens();
+            uint256[] memory amountsBefore = new uint256[](bonusTokens.length);
+
+            for (uint256 j; j < bonusTokens.length; j++) {
+                if (bonusTokens[j] == NATIVE) bonusTokens[j] = address(WETH);
+
+                amountsBefore[j] = IERC20(bonusTokens[j]).balanceOf(address(this));
+            }
+
+            IPendleMarket(_markets[i]).redeemRewards(address(this));
+
+            for (uint256 j; j < bonusTokens.length; j++) {
+                uint256 amountAfter = IERC20(bonusTokens[j]).balanceOf(address(this));
+
+                uint256 originalBonusBalance = amountAfter - amountsBefore[j];
+                uint256 leftBonusBalance = originalBonusBalance;
+                uint256 currentMarketHarvestPendleReward;
+
+                if (originalBonusBalance == 0) continue;
+
+                if (bonusTokens[j] == PENDLE) {
+                    currentMarketHarvestPendleReward =
+                        (originalBonusBalance * harvestCallerPendleFee) /
+                        DENOMINATOR;
+                    leftBonusBalance = originalBonusBalance - currentMarketHarvestPendleReward;
+                }
+                harvestCallerTotalPendleReward += currentMarketHarvestPendleReward;
+
+                _sendRewards(
+                    _markets[i],
+                    bonusTokens[j],
+                    poolInfo.rewarder,
+                    originalBonusBalance,
+                    leftBonusBalance
+                );
+            }
+        }
+
+        uint256 pendleForMPendleFee = IERC20(PENDLE).balanceOf(address(this)) - pendleBefore - harvestCallerTotalPendleReward;
+        _sendMPendleFees(pendleForMPendleFee);
+
+        if (harvestCallerTotalPendleReward > 0) {
+            IERC20(PENDLE).approve(ETHZapper, harvestCallerTotalPendleReward);
+
+            IETHZapper(ETHZapper).swapExactTokensToETH(
+                PENDLE,
+                harvestCallerTotalPendleReward,
+                _minEthToRecieve,
+                _caller
+            );
+        }
+    }
+
+    function _sendMPendleFees(uint256 _pendleAmount) internal {
+        uint256 totalmPendleFees;
+        uint256 mPendleFeesToSend;
+
+        if (_pendleAmount > 0) {
+            mPendleFeesToSend = _convertPendleTomPendle(_pendleAmount);
+        } else {
+            return; // no need to send mPendle
+        }
+
+        for (uint256 i = 0; i < pendleFeeInfos.length; i++) {
+            Fees storage feeInfo = pendleFeeInfos[i];
+            if (feeInfo.isActive && feeInfo.isMPENDLE){
+                totalmPendleFees+=feeInfo.value;
+            }
+        }
+        if(totalmPendleFees == 0) return;
+
+        for (uint256 i = 0; i < pendleFeeInfos.length; i++) {
+            Fees storage feeInfo = pendleFeeInfos[i];
+            if (feeInfo.isActive && feeInfo.isMPENDLE) {
+                uint256 amount = mPendleFeesToSend * feeInfo.value / totalmPendleFees;
+                if(amount > 0){
+                    if (!feeInfo.isAddress) {
+                        IERC20(mPendleOFT).safeApprove(feeInfo.to, amount);
+                        IBaseRewardPool(feeInfo.to).queueNewRewards(amount, mPendleOFT);
+                    } else {
+                        IERC20(mPendleOFT).safeTransfer(feeInfo.to, amount);
+                    }
+                }
+            }
+        }
+    }
+
+    function _convertPendleTomPendle(uint256 _pendleAmount) internal returns(uint256 mPendleToSend) {
+        uint256 mPendleBefore = IERC20(mPendleOFT).balanceOf(address(this));
+
+        if (smartPendleConvert != address(0)) {
+            IERC20(PENDLE).safeApprove(smartPendleConvert, _pendleAmount);
+            ISmartPendleConvert(smartPendleConvert).smartConvert(_pendleAmount, 0);
+            mPendleToSend = IERC20(mPendleOFT).balanceOf(address(this)) - mPendleBefore;
+        } else {
+            IERC20(PENDLE).safeApprove(mPendleConvertor, _pendleAmount);
+            IConvertor(mPendleConvertor).convert(address(this), _pendleAmount, 0);
+            mPendleToSend = IERC20(mPendleOFT).balanceOf(address(this)) - mPendleBefore;
         }
     }
 
@@ -594,109 +865,78 @@ abstract contract PendleStakingBaseUpg is
     /// @param _market the PENDLE market
     /// @param _rewardToken the address of the reward token to send
     /// @param _rewarder the rewarder for PENDLE lp that will get the rewards
-    /// @param _amount the initial amount of rewards after harvest
+    /// @param _originalRewardAmount  the initial amount of rewards after harvest
+    /// @param _leftRewardAmount the intial amount - harvest caller rewardfee amount after harvest
     function _sendRewards(
         address _market,
         address _rewardToken,
         address _rewarder,
-        uint256 _amount
+        uint256 _originalRewardAmount,
+        uint256 _leftRewardAmount
     ) internal {
-        if (_amount == 0) return;
-        uint256 originalRewardAmount = _amount;
+        if (_leftRewardAmount == 0) return;
 
         if (_rewardToken == address(PENDLE)) {
             for (uint256 i = 0; i < pendleFeeInfos.length; i++) {
                 Fees storage feeInfo = pendleFeeInfos[i];
 
                 if (feeInfo.isActive) {
-                    address rewardToken = _rewardToken;
-                    uint256 feeAmount = (originalRewardAmount * feeInfo.value) /
-                        DENOMINATOR;
-                    _amount -= feeAmount;
+                    uint256 feeAmount = (_originalRewardAmount * feeInfo.value) / DENOMINATOR;
+                    _leftRewardAmount -= feeAmount;
                     uint256 feeTosend = feeAmount;
 
-                    if (feeInfo.isMPENDLE) {
-                        if (smartPendleConvert != address(0)) {
-                            IERC20(PENDLE).safeApprove(
-                                smartPendleConvert,
-                                feeAmount
-                            );
-                            uint256 beforeBalance = IERC20(mPendleOFT)
-                                .balanceOf(address(this));
-                            ISmartPendleConvert(smartPendleConvert)
-                                .smartConvert(feeAmount, 0);
-                            rewardToken = mPendleOFT;
-                            feeTosend =
-                                IERC20(mPendleOFT).balanceOf(address(this)) -
-                                beforeBalance;
+                    if (!feeInfo.isMPENDLE) {
+                        if (!feeInfo.isAddress) {
+                            IERC20(_rewardToken).safeApprove(feeInfo.to, feeTosend);
+                            IBaseRewardPool(feeInfo.to).queueNewRewards(feeTosend, _rewardToken);
                         } else {
-                            IERC20(PENDLE).safeApprove(
-                                mPendleConvertor,
-                                feeAmount
-                            );
-                            uint256 beforeBalance = IERC20(mPendleOFT)
-                                .balanceOf(address(this));
-                            IConvertor(mPendleConvertor).convert(
-                                address(this),
-                                feeAmount,
-                                0
-                            );
-                            rewardToken = mPendleOFT;
-                            feeTosend =
-                                IERC20(mPendleOFT).balanceOf(address(this)) -
-                                beforeBalance;
+                            IERC20(_rewardToken).safeTransfer(feeInfo.to, feeTosend);
                         }
                     }
-
-                    if (!feeInfo.isAddress) {
-                        IERC20(rewardToken).safeApprove(feeInfo.to, feeTosend);
-                        IBaseRewardPool(feeInfo.to).queueNewRewards(
-                            feeTosend,
-                            rewardToken
-                        );
-                    } else {
-                        IERC20(rewardToken).safeTransfer(feeInfo.to, feeTosend);
-                    }
-
-                    emit RewardPaidTo(
-                        _market,
-                        feeInfo.to,
-                        rewardToken,
-                        feeTosend
-                    );
+                    emit RewardPaidTo(_market, feeInfo.to, _rewardToken, feeTosend);
                 }
             }
         } else {
             // other than PENDLE reward token.
             // if auto Bribe fee is 0, then all go to LP rewarder
-            if (autoBribeFee > 0) {
-                uint256 autoBribeAmount = (originalRewardAmount *
-                autoBribeFee) / DENOMINATOR;
-                _amount -= autoBribeAmount;
-
-                if (bribeManager != address(0)) {
-                    uint256 bribePid = IPenpieBribeManager(bribeManager).marketToPid(_market);
+            if (autoBribeFee > 0 && bribeManager != address(0)) {
+                uint256 bribePid = IPenpieBribeManager(bribeManager).marketToPid(_market);
+                if (IPenpieBribeManager(bribeManager).pools(bribePid)._active) {
+                    uint256 autoBribeAmount = (_originalRewardAmount * autoBribeFee) / DENOMINATOR;
+                    _leftRewardAmount -= autoBribeAmount;
                     IERC20(_rewardToken).safeApprove(bribeManager, autoBribeAmount);
-                    IPenpieBribeManager(bribeManager).addBribeERC20(1, bribePid, _rewardToken, autoBribeAmount);
-
-                    emit RewardPaidTo(
-                        _market,
-                        bribeManager,
+                    IPenpieBribeManager(bribeManager).addBribeERC20(
+                        1,
+                        bribePid,
                         _rewardToken,
-                        _amount
+                        autoBribeAmount,
+                        false
                     );
-                } else {
-                    IERC20(_rewardToken).safeTransfer(
-                        bribeManagerEOA,
-                        autoBribeAmount
-                    );
+
+                    emit RewardPaidTo(_market, bribeManager, _rewardToken, autoBribeAmount);
                 }
             }
         }
 
+        _queueRewarder(_market, _rewardToken, _rewarder, _leftRewardAmount);
+    }
+
+    function _queueRewarder(address _market, address _rewardToken, address _rewarder, uint256 _leftRewardAmount) internal {
+        if(ismPendleRewardMarket[_market] && _rewardToken == address(PENDLE)){
+            uint256 mPendleToSend;
+            if(_leftRewardAmount == 0) return;
+            mPendleToSend = _convertPendleTomPendle(_leftRewardAmount);
+            
+            uint256 mPendleToMgpBlackHole = (mPendleToSend * mPendleBurnRatio) / DENOMINATOR;
+            uint256 mPendleToQueue = mPendleToSend - mPendleToMgpBlackHole;
+            _rewardToken = mPendleOFT;
+            _leftRewardAmount = mPendleToQueue;
+            IERC20(mPendleOFT).safeTransfer(mgpBlackHole, mPendleToMgpBlackHole);
+            emit MPendleBurn(mgpBlackHole, mPendleToMgpBlackHole);
+        }
         IERC20(_rewardToken).safeApprove(_rewarder, 0);
-        IERC20(_rewardToken).safeApprove(_rewarder, _amount);
-        IBaseRewardPool(_rewarder).queueNewRewards(_amount, _rewardToken);
-        emit RewardPaidTo(_market, _rewarder, _rewardToken, _amount);
+        IERC20(_rewardToken).safeApprove(_rewarder, _leftRewardAmount);
+        IBaseRewardPool(_rewarder).queueNewRewards(_leftRewardAmount, _rewardToken);
+        emit RewardPaidTo(_market, _rewarder, _rewardToken, _leftRewardAmount);
     }
 }

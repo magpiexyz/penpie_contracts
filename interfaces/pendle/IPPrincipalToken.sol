@@ -18,4 +18,6 @@ interface IPPrincipalToken is IERC20Metadata {
     function expiry() external view returns (uint256);
 
     function isExpired() external view returns (bool);
+
+    function symbol() external view returns (string memory);
 }

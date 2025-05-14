@@ -46,6 +46,8 @@ interface IPMarket is IERC20Metadata, IPGauge {
         uint256 netPtDesired
     ) external returns (uint256 netLpOut, uint256 netSyUsed, uint256 netPtUsed);
 
+    function mint(address account, uint256 amount) external;
+
     function burn(
         address receiverSy,
         address receiverPt,

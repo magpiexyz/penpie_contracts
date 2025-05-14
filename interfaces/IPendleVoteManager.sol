@@ -24,7 +24,7 @@ interface IPendleVoteManager {
 
     function unVote(address _lp) external;
 
-    function addPool(address _market, uint16 _chainId) external;
+    function addPool(address _market, uint256 _chainId) external;
 
     function removePool(uint256 _index) external;
 

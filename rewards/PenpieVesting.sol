@@ -37,6 +37,8 @@ contract PenpieVesting is Initializable, OwnableUpgradeable, ReentrancyGuardUpgr
 
     /* ============ Constructor ============ */
 
+    constructor() { _disableInitializers(); }
+
     function __PenpieVesting_init(
         IERC20 _pnp,
         IERC20 _rPNP,

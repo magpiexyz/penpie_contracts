@@ -20,6 +20,7 @@ interface IMasterPenpieReader {
     }
     function tokenToPoolInfo(address) external view returns (PenpiePoolInfo memory);
     function getPoolInfo(address) external view returns (uint256, uint256, uint256, uint256);
+    function legacyRewarders(address) external view returns (address);
     function allPendingTokens(address _stakingToken, address _user)
         external view returns (
             uint256 pendingPenpie,

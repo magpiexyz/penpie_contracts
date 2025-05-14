@@ -211,19 +211,20 @@ contract ActionAddRemoveLiqMock is IPActionAddRemoveLiq, ActionBaseMintRedeem {
         address market,
         uint256 minLpOut,
         ApproxParams calldata guessPtReceivedFromSy,
-        TokenInput calldata input
-    ) external payable returns (uint256 netLpOut, uint256 netSyFee) {
+        TokenInput calldata input,
+        LimitOrderData calldata limit
+    ) external payable returns (uint256 netLpOut, uint256 netSyFee, uint256 netSyInterm) {
         (IStandardizedYield SY, , IPYieldToken YT) = IPMarket(market).readTokens();
 
         // mint SY directly to the market
-        uint256 netSyUsed = _mintSyFromToken(market, address(SY), 1, input);
+        // _mintSyFromToken(market, address(SY), 1, input);
 
         // mint LP
         (netLpOut, netSyFee) = _addLiquiditySingleSy(
             receiver,
             market,
             YT,
-            netSyUsed,
+            input.netTokenIn,
             minLpOut,
             guessPtReceivedFromSy
         );
@@ -505,24 +506,24 @@ contract ActionAddRemoveLiqMock is IPActionAddRemoveLiq, ActionBaseMintRedeem {
         MarketState memory state = IPMarket(market).readState(address(this));
 
         // calculate the PT amount needed to add liquidity
-        (uint256 netPtFromSwap, , ) = state.approxSwapSyToAddLiquidity(
-            YT.newIndex(),
-            netSyIn,
-            block.timestamp,
-            guessPtReceivedFromSy
-        );
+        // (uint256 netPtFromSwap, , ) = state.approxSwapSyToAddLiquidity(
+        //     YT.newIndex(),
+        //     netSyIn,
+        //     block.timestamp,
+        //     guessPtReceivedFromSy
+        // );
+        netLpOut = netSyIn;
 
         // execute the swap & the addLiquidity
         uint256 netSySwapped;
         (netSySwapped, netSyFee) = IPMarket(market).swapSyForExactPt(
             market,
-            netPtFromSwap,
+            netSyIn,
             EMPTY_BYTES
         );
 
-        (netLpOut, , ) = IPMarket(market).mint(receiver, netSyIn - netSySwapped, netPtFromSwap);
-
-        if (netLpOut < minLpOut) revert Errors.RouterInsufficientLpOut(netLpOut, minLpOut);
+        IPMarket(market).mint(receiver, netSyIn);
+        if (netSyIn < minLpOut) revert Errors.RouterInsufficientLpOut(netSyIn, minLpOut);
     }
 
     /**

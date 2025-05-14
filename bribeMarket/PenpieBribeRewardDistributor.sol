@@ -10,6 +10,7 @@ import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/securit
 import { MerkleProof } from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 import "../libraries/math/Math.sol";
+import "../libraries/batchSwapHelper.sol";
 
 /// @title PenpieBribeRewardDistributor
 /// @notice Penpie bribe reward distributor is used for distributing rewards from voting.
@@ -64,6 +65,9 @@ contract PenpieBribeRewardDistributor is
     mapping(address => mapping(address => uint256)) public claimed; // Tracks the amount of claimed reward for the specified token+account
     mapping(address => bool) public allowedOperator;
 
+    /* ============ 1st Upgrade ============ */
+    address public odosRouter;
+
     /* ============ Events ============ */
 
     event RewardClaimed(
@@ -85,16 +89,35 @@ contract PenpieBribeRewardDistributor is
         address _oldManager,
         address _newManager
     );
+    event RewardClaimedAsSpecificToken(
+        address[] indexed tokens,
+        address indexed tokenOut,
+        uint256 totalAmountSwappedOut,
+        address indexed account
+    );
+    event UpdatedOdosRouter(
+        address indexed updatedOdosRouter
+    );
+    event NativeRewardsSentBack(
+        address indexed user,
+        uint256 amount
+    );
+    event RewardsSentBack(
+        address indexed rewardToken,
+        address indexed user,
+        uint256 amount
+    );
+     
 
     /* ============ Errors ============ */
 
     error OnlyOperator();
-    error OnlyBribeManager();
     error DistributionNotEnabled();
     error InvalidProof();
     error InsufficientClaimable();
     error TransferFailed();
     error InvalidDistributions();
+    error NotValidAccount();
 
     /* ============ Constructor ============ */
     constructor() {
@@ -115,11 +138,6 @@ contract PenpieBribeRewardDistributor is
 
     modifier onlyOperator() {
         if (!allowedOperator[msg.sender]) revert OnlyOperator();
-        _;
-    }
-
-    modifier onlyBribeManager() {
-        if (msg.sender != bribeManager) revert OnlyBribeManager();
         _;
     }
 
@@ -147,7 +165,7 @@ contract PenpieBribeRewardDistributor is
         return claimables;
     }
 
-    function claim(Claim[] calldata _claims) external nonReentrant {
+    function claim(Claim[] calldata _claims) external nonReentrant whenNotPaused {
         for (uint256 i; i < _claims.length; ++i) {
             _claim(
                 _claims[i].token,
@@ -155,6 +173,55 @@ contract PenpieBribeRewardDistributor is
                 _claims[i].amount,
                 _claims[i].merkleProof
             );
+        }
+    }
+
+    /**
+        @notice Claim a reward
+        @param  _transactionData  transaction data excluding WETH.
+        @param  _claims   reward _claims data.
+     */
+    function claimAsSpecificToken(bytes[] calldata _transactionData, Claim[] calldata _claims, address _tokenForSwapOut) external nonReentrant whenNotPaused onlyOperator {
+        address[] memory tokensForSwap = new address[](_claims.length);
+        uint256[] memory tokenAmountsForSwap = new uint256[](_claims.length);
+        uint256 tokenForSwapAndAmountIndex = 0;
+    
+        for (uint256 i; i < _claims.length; ++i) {
+            if(_claims[i].account != msg.sender) revert NotValidAccount();
+
+            uint256 claimable = _claimable(
+                    _claims[i].token,
+                    _claims[i].account,
+                    _claims[i].amount,
+                    _claims[i].merkleProof
+            );
+
+            if(claimable == 0) revert InsufficientClaimable();
+
+            claimed[_claims[i].token][_claims[i].account] += claimable;
+            if(_claims[i].token == NATIVE)
+            {
+                (bool sent, ) = payable(_claims[i].account).call{ value: claimable }("");
+                if (!sent) revert TransferFailed();
+                emit NativeRewardsSentBack(_claims[i].account, claimable);
+            }
+            else if(_claims[i].token == _tokenForSwapOut)
+            {
+                IERC20(_claims[i].token).safeTransfer(_claims[i].account, claimable);
+                emit RewardsSentBack(_claims[i].token, _claims[i].account, claimable);
+            } 
+            else 
+            {
+                tokensForSwap[tokenForSwapAndAmountIndex] = _claims[i].token;
+                tokenAmountsForSwap[tokenForSwapAndAmountIndex] = claimable;
+                tokenForSwapAndAmountIndex++;
+            }
+        }
+
+        if(tokenForSwapAndAmountIndex > 0)
+        {
+            uint256 totalSwappedAmount = _batchSwap(_transactionData, tokensForSwap, tokenAmountsForSwap, _tokenForSwapOut, msg.sender, tokenForSwapAndAmountIndex);
+            emit RewardClaimedAsSpecificToken(tokensForSwap, _tokenForSwapOut, totalSwappedAmount, msg.sender);
         }
     }
 
@@ -244,11 +311,31 @@ contract PenpieBribeRewardDistributor is
         emit RewardClaimed(_token, _account, claimable, reward.updateCount);
     }
 
+    function _batchSwap(
+        bytes[] calldata _transactionData,
+        address[] memory _tokensForSwap, 
+        uint256[] memory _tokenAmountsForSwap,
+        address _tokenForSwapOut,
+        address _reciever,
+        uint256 totalTokenForSwapLength
+    ) internal returns (uint256) { 
+        address[] memory tokensForSwap = new address[](totalTokenForSwapLength);
+        uint256[] memory tokenAmountsForSwap = new uint256[](totalTokenForSwapLength);
+
+        for(uint256 i; i < totalTokenForSwapLength; ++i) {
+            tokensForSwap[i] = _tokensForSwap[i];
+            tokenAmountsForSwap[i] = _tokenAmountsForSwap[i];
+        }
+
+        uint256 totalSwappedAmount =  batchSwapHelper.batchSwap(_transactionData, tokensForSwap, tokenAmountsForSwap, _tokenForSwapOut, _reciever, odosRouter);
+        return totalSwappedAmount;
+    }
+
     /* ============ Admin Functions ============ */
 
     function updateDistribution(
         Distribution[] calldata _distributions
-    ) external onlyOwner {
+    ) external onlyOperator {
         if (_distributions.length == 0) revert InvalidDistributions();
 
         for (uint256 i; i < _distributions.length; ++i) {
@@ -267,9 +354,9 @@ contract PenpieBribeRewardDistributor is
     }
 
     function emergencyWithdraw(address _token, address _receiver) external onlyOwner {
-        if (_token == bribeManager) {
+        if (_token == NATIVE) {
             address payable recipient = payable(_receiver);
-            recipient.transfer(address(this).balance);
+            recipient.call{value: address(this).balance}("");
         } else {
             IERC20(_token).safeTransfer(
                 _receiver,
@@ -284,13 +371,18 @@ contract PenpieBribeRewardDistributor is
         emit UpdateBribeManager(oldManager, _manager);
     }
 
-    function updateAllowedUperator(address _user, bool _allowed) external onlyOwner {
+    function setOdosRouter(address _odosRouter) external onlyOwner {
+        odosRouter = _odosRouter;
+        emit UpdatedOdosRouter(_odosRouter);
+    }
+
+    function updateAllowedOperator(address _user, bool _allowed) external onlyOwner {
         allowedOperator[_user] = _allowed;
 
         emit UpdateOperatorStatus(_user, _allowed);
     }
 
-	function pause() public onlyOwner {
+	function pause() public onlyOperator {
 		_pause();
 	}
 

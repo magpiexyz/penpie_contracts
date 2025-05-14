@@ -11,8 +11,9 @@ interface IPendleMarketDepositHelper {
     function depositMarketFor(address _market, address _for, uint256 _amount) external;
     function withdrawMarket(address _market, uint256 _amount) external;
     function withdrawMarketWithClaim(address _market, uint256 _amount, bool _doClaim) external;
-    function harvest(address _market) external;
+    function harvest(address _market, uint256 _minEthToRecieve) external;
     function setPoolInfo(address poolAddress, address rewarder, bool isActive) external;
+    function removePoolInfo(address market) external;
     function setOperator(address _address, bool _value) external;
     function setmasterPenpie(address _masterPenpie) external;
 }

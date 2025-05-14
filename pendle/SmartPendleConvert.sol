@@ -7,9 +7,9 @@ import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/I
 import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 
-import "../interfaces/wombat/IWombatRouter.sol";
+import "../interfaces/pancakeswap/IStableSwapRouter.sol";
+import "../interfaces/pancakeswap/IPancakeStableSwapTwoPool.sol";
 import "../interfaces/IConvertor.sol";
-import "../interfaces/wombat/IWombatAsset.sol";
 import "../interfaces/ISmartPendleConvert.sol";
 import "../interfaces/IMasterPenpie.sol";
 import "../interfaces/ILocker.sol";
@@ -41,6 +41,10 @@ contract SmartPendleConvert is
     uint256 public buybackThreshold;
     ILocker public mPendleSV;
 
+    /* ===== 1st upgrade ===== */
+    uint256 constant Pendle_Index = 0;
+    uint256 constant MPendle_Index = 1;
+
     /* ============ Errors ============ */
 
     error IncorrectRatio();
@@ -59,8 +63,13 @@ contract SmartPendleConvert is
     );
 
     event mPendleSVUpdated(address _oldmPendleSV, address _newmPendleSV);
+    event PancakeSwapRouterSet(address _router, address _pendleMPendlePool);
 
     /* ============ Constructor ============ */
+
+    constructor() {
+        _disableInitializers();
+    }
 
     function __SmartPendleConvert_init(
         address _mPendleOFT,
@@ -100,44 +109,23 @@ contract SmartPendleConvert is
         uint256 amountOut = 0;
 
         if (buybackAmount > 0) {
-            address[] memory tokenPath = new address[](2);
-            tokenPath[0] = pendle;
-            tokenPath[1] = mPendleOFT;
-
-            address[] memory poolPath = new address[](1);
-            poolPath[0] = pendleMPendlePool;
-
-            (amountOut, ) = IWombatRouter(router).getAmountOut(
-                tokenPath,
-                poolPath,
-                int256(buybackAmount)
-            );
+            (amountOut) = IPancakeStableSwapTwoPool(pendleMPendlePool).get_dy(Pendle_Index, MPendle_Index, buybackAmount);
         }
 
         return (amountOut + convertAmount);
     }
 
     function maxSwapAmount() public view returns (uint256) {
-        uint256 pendleCash = IWombatAsset(pendleAsset).cash();
-        uint256 pendleLiability = IWombatAsset(pendleAsset).liability();
-        if (pendleCash >= pendleLiability) return 0;
-       
-        return ((pendleLiability - pendleCash) * ratio) / DENOMINATOR;
+        uint256 pendleBalance = IPancakeStableSwapTwoPool(pendleMPendlePool).balances(Pendle_Index);
+        uint256 mPendleBalance = IPancakeStableSwapTwoPool(pendleMPendlePool).balances(MPendle_Index);
+
+        if (pendleBalance >= mPendleBalance) return 0;
+
+        return ((mPendleBalance - pendleBalance) * ratio) / DENOMINATOR;
     }
 
     function currentRatio() public view returns (uint256) {
-        address[] memory tokenPath = new address[](2);
-        tokenPath[0] = mPendleOFT;
-        tokenPath[1] = pendle;
-
-        address[] memory poolPath = new address[](1);
-        poolPath[0] = pendleMPendlePool;
-
-        (uint256 amountOut, ) = IWombatRouter(router).getAmountOut(
-            tokenPath,
-            poolPath,
-            1e18
-        );
+        uint256 amountOut = IPancakeStableSwapTwoPool(pendleMPendlePool).get_dy(MPendle_Index, Pendle_Index, 1e18);
         return (amountOut * DENOMINATOR) / 1e18;
     }
 
@@ -148,7 +136,7 @@ contract SmartPendleConvert is
         uint256 _convertRatio,
         uint256 _minRec,
         uint256 _mode
-    ) external returns (uint256 obtainedMPendleAmount) {
+    ) external nonReentrant returns (uint256 obtainedMPendleAmount) {
         obtainedMPendleAmount = _convertFor(
             _amountIn,
             _convertRatio,
@@ -164,7 +152,7 @@ contract SmartPendleConvert is
         uint256 _minRec,
         address _for,
         uint256 _mode
-    ) external returns (uint256 obtainedMPendleAmount) {
+    ) external nonReentrant returns (uint256 obtainedMPendleAmount) {
         obtainedMPendleAmount = _convertFor(
             _amountIn,
             _convertRatio,
@@ -178,21 +166,21 @@ contract SmartPendleConvert is
     function smartConvert(
         uint256 _amountIn,
         uint256 _mode
-    ) external override returns (uint256 obtainedMPendleAmount) {
+    ) external override nonReentrant returns (uint256 obtainedMPendleAmount) {
         if (_amountIn == 0) revert MustNoBeZero();
 
-        uint256 convertRatio = DENOMINATOR;
-        uint256 mPendleToPendle = currentRatio();
-
-        if (mPendleToPendle < buybackThreshold) {
-            uint256 maxSwap = maxSwapAmount();
-            uint256 amountToSwap = _amountIn > maxSwap ? maxSwap : _amountIn;
-            uint256 convertAmount = _amountIn - amountToSwap;
-            convertRatio = (convertAmount * DENOMINATOR) / _amountIn;
-        }
+        uint256 convertRatio = _calConvertRatio(_amountIn);
 
         return
             _convertFor(_amountIn, convertRatio, _amountIn, msg.sender, _mode);
+    }
+
+    function smartConvertFor(uint256 _amountIn, uint256 _mode, address _for) external nonReentrant returns (uint256 obtainedmWomAmount) {
+        if (_amountIn == 0) revert MustNoBeZero();
+
+        uint256 convertRatio = _calConvertRatio(_amountIn);
+
+        return _convertFor(_amountIn, convertRatio, _amountIn, _for, _mode);
     }
 
     function setRatio(uint256 _ratio) external onlyOwner {
@@ -218,7 +206,28 @@ contract SmartPendleConvert is
         emit mPendleSVUpdated(_oldmPendleSV, _newmPendleSV);
     }
 
+    function setPancakeSwapRouter(address _router, address _pendleMPendlePool) public onlyOwner {
+        if (_router == address(0) || _pendleMPendlePool == address(0)) revert AddressZero();
+
+        pendleMPendlePool = _pendleMPendlePool;
+        router = _router;
+
+        emit PancakeSwapRouterSet(_router, _pendleMPendlePool);
+    }
+
     /* ============ Internal Functions ============ */
+
+    function _calConvertRatio(uint256 _amountIn) internal view returns (uint256 convertRatio) {
+        convertRatio = DENOMINATOR;
+        uint256 mPendleToPendle = currentRatio();
+
+        if (mPendleToPendle < buybackThreshold) {
+            uint256 maxSwap = maxSwapAmount();
+            uint256 amountToSwap = _amountIn > maxSwap ? maxSwap : _amountIn;
+            uint256 convertAmount = _amountIn - amountToSwap;
+            convertRatio = convertAmount * DENOMINATOR / _amountIn;
+        }
+    }
 
     function _convertFor(
         uint256 _amount,
@@ -226,7 +235,7 @@ contract SmartPendleConvert is
         uint256 _minRec,
         address _for,
         uint256 _mode
-    ) internal nonReentrant returns (uint256 obtainedMPendleAmount) {
+    ) internal returns (uint256 obtainedMPendleAmount) {
         if (_convertRatio > DENOMINATOR) revert IncorrectRatio();
 
         IERC20(pendle).safeTransferFrom(msg.sender, address(this), _amount);
@@ -239,18 +248,22 @@ contract SmartPendleConvert is
             address[] memory tokenPath = new address[](2);
             tokenPath[0] = pendle;
             tokenPath[1] = mPendleOFT;
-            address[] memory poolPath = new address[](1);
-            poolPath[0] = pendleMPendlePool;
+            uint256[] memory flag = new uint256[](1);
+            flag[0] = 2;
 
             IERC20(pendle).safeApprove(router, buybackAmount);
-            amountRec = IWombatRouter(router).swapExactTokensForTokens(
+
+            uint256 oldBalance = IERC20(mPendleOFT).balanceOf(address(this));
+            IStableSwapRouter(router).exactInputStableSwap(
                 tokenPath,
-                poolPath,
+                flag,
                 buybackAmount,
                 0,
-                address(this),
-                block.timestamp
+                address(this)
             );
+            uint256 newBalance = IERC20(mPendleOFT).balanceOf(address(this));
+
+            amountRec = newBalance - oldBalance;
         }
 
         if (convertAmount > 0) {

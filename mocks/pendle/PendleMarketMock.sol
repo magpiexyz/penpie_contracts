@@ -3,10 +3,22 @@
 pragma solidity ^0.8.0;
 
 import { IMintableERC20 } from "../../interfaces/IMintableERC20.sol";
+import "../../interfaces/pendle/IStandardizedYield.sol";
+import "../../interfaces/pendle/IPPrincipalToken.sol";
+import "../../interfaces/pendle/IPYieldToken.sol";
+import "../../libraries/math/MarketMathCore.sol";
+import "./interfaces/IPMarketFactory.sol";
+import "./pendleStandardizedYield/erc20/PendleERC20Permit.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
-contract PendleMarketMock is ERC20, Ownable {
+contract PendleMarketMock is PendleERC20Permit, Ownable {
+    IStandardizedYield public  SY;
+    IPPrincipalToken public  PT;
+    IPYieldToken public  YT;
+
+    address public immutable factory;
+
     struct UserReward {
         uint256 latestUpdated;
         uint256 accrued;
@@ -17,14 +29,29 @@ contract PendleMarketMock is ERC20, Ownable {
         uint256 lastBalance;
     }
 
+    struct MarketStorage {
+        int128 totalPt;
+        int128 totalSy;
+        // 1 SLOT = 256 bits
+        uint96 lastLnImpliedRate;
+        uint16 observationIndex;
+        uint16 observationCardinality;
+        uint16 observationCardinalityNext;
+        // 1 SLOT = 144 bits
+    }
+
     uint256 constant rewardAmt = 1e18;
+    MarketStorage public _storage;
+
 
     address[] public rewardTokens;
     mapping(address => mapping(address => UserReward)) public userReward;
     mapping(address => RewardState) public rewardState;
     uint256 public rewardDuration; // New variable to set the reward duration
 
-    constructor() ERC20("PMT", "PMT") {}
+    constructor() PendleERC20Permit("PMT", "PMT", 18) {
+        factory = msg.sender;
+    }
 
     function addReward(address _token) external {
         rewardTokens.push(_token);
@@ -32,6 +59,11 @@ contract PendleMarketMock is ERC20, Ownable {
 
     function getRewardTokens() external view returns (address[] memory) {
         return rewardTokens;
+    }
+
+    function setSyToken(address _sy) external 
+    {
+        SY = IStandardizedYield(_sy);
     }
 
     function setDuration(uint256 _rewardDuration) external {
@@ -63,7 +95,7 @@ contract PendleMarketMock is ERC20, Ownable {
         IMintableERC20(_token).mint(_to, _amount);
     }
 
-    function mint(address account, uint256 amount) external virtual onlyOwner {
+    function mint(address account, uint256 amount) external virtual {
         _mint(account, amount);
     }
 
@@ -86,5 +118,23 @@ contract PendleMarketMock is ERC20, Ownable {
                 reward.latestUpdated = currentTimestamp;
             }
         }
+    }
+
+    function readState(address router) public view returns (MarketState memory market) {}
+
+    function swapSyForExactPt(
+        address receiver,
+        uint256 exactPtOut,
+        bytes calldata data
+    ) external nonReentrant returns (uint256 netSyIn, uint256 netSyFee) {}
+
+    function readTokens()
+        external
+        view
+        returns (IStandardizedYield _SY, IPPrincipalToken _PT, IPYieldToken _YT)
+    {
+        _SY = SY;
+        _PT = IPPrincipalToken(address(0));
+        _YT = IPYieldToken(address(0));
     }
 }

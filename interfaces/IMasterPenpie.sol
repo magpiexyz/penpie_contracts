@@ -12,8 +12,9 @@ interface IMasterPenpie {
 
     function add(uint256 _allocPoint, address _stakingTokenToken, address _receiptToken, address _rewarder) external;
 
-    function set(address _stakingToken, uint256 _allocPoint, address _helper,
-        address _rewarder, bool _helperNeedsHarvest) external;
+    function set(address _stakingToken, uint256 _allocPoint, address _rewarder, bool _isActive) external;
+
+    function removePool(address _stakingToken) external;
 
     function createRewarder(address _stakingTokenToken, address mainRewardToken) external
         returns (address);
@@ -81,7 +82,7 @@ interface IMasterPenpie {
 
     function multiclaimFor(address[] calldata _stakingTokens, address[][] calldata _rewardTokens, address user_address) external;
 
-    function multiclaimOnBehalf(address[] memory _stakingTokens, address[][] calldata _rewardTokens, address user_address) external;
+    function multiclaimOnBehalf(address[] memory _stakingTokens, address[][] calldata _rewardTokens, address user_address, bool _isClaimPNP) external;
 
     function multiclaim(address[] calldata _stakingTokens) external;
 
@@ -95,4 +96,7 @@ interface IMasterPenpie {
         returns (uint256 depositAmount, uint256 availableAmount);
     
     function totalTokenStaked(address _stakingToken) external view returns (uint256);
+
+    function getRewarder(address _stakingToken) external view returns (address rewarder);
+
 }

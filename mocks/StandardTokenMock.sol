@@ -43,4 +43,16 @@ contract StandardTokenMock is ERC20 {
         _burn(_from, _amount);
         return _amount;
     }
+
+    function withdraw(uint256 amount) external {
+        withdrawTo(msg.sender, amount);
+    }
+
+    function withdrawTo(address account, uint256 amount) public {
+        _burn(msg.sender, amount);
+        (bool sent, ) = payable(account).call{ value: amount }("");
+        require(sent, "FAIL_TRANSFER");
+    }
+
+    receive() external payable { }
 }

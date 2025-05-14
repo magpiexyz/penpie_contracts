@@ -58,6 +58,16 @@ contract PendleMarketDepositHelper is
         uint256 _amount
     );
 
+    event NewEmergencyWithdraw(
+        address indexed _user,
+        address indexed _market,
+        uint256 _amount
+    );
+
+    event PoolInfoSet(address indexed market, address indexed rewarder, bool isActive);
+    event OperatorSet(address indexed _address, bool _value);
+    event MasterPenpieSet(address indexed _masterPenpie);
+
     /* ============ Errors ============ */
 
     error DeactivatePool();
@@ -114,7 +124,7 @@ contract PendleMarketDepositHelper is
 
     /* ============ External Functions ============ */
 
-    function depositMarket(address _market, uint256 _amount) external {
+    function depositMarket(address _market, uint256 _amount) external onlyActivePool(_market) nonReentrant {
         _depositMarket(_market, msg.sender, msg.sender, _amount);
     }
 
@@ -123,23 +133,30 @@ contract PendleMarketDepositHelper is
         address _market,
         address _for,
         uint256 _amount
-    ) external {
+    ) external onlyActivePool(_market) nonReentrant {
         _depositMarket(_market, _for, msg.sender, _amount);
     }
 
-    function withdrawMarket(address _market, uint256 _amount) external {
+    function withdrawMarket(address _market, uint256 _amount) external onlyActivePool(_market) nonReentrant {
         _withdrawMarket(_market, msg.sender, _amount);
     }
  
-    function withdrawMarketWithClaim(address _market, uint256 _amount, bool _doClaim) external {
+    function withdrawMarketWithClaim(address _market, uint256 _amount, bool _doClaim) external onlyActivePool(_market) nonReentrant {
         if(_doClaim)
            _withdrawMarketWithClaim(_market, msg.sender, _amount);
        else
            _withdrawMarket(_market, msg.sender, _amount);
     }
+ 
+    function emergencyWithdrawMarketWithClaim(address _market, uint256 _amount, bool _doClaim) external nonReentrant {
+        if(_doClaim)
+           _emergencyWithdrawMarketWithClaim(_market, msg.sender, _amount);
+       else
+           _emergencyWithdrawMarket(_market, msg.sender, _amount);
+    }
 
-    function harvest(address _market) external {
-        IPendleStaking(pendleStaking).harvestMarketReward(_market);
+    function harvest(address _market, uint256 _minEthToRecieve) external nonReentrant {
+        IPendleStaking(pendleStaking).harvestMarketReward(_market,  msg.sender, _minEthToRecieve);
     }
 
     /* ============ Internal Functions ============ */
@@ -149,7 +166,7 @@ contract PendleMarketDepositHelper is
         address _for,
         address _from,
         uint256 _amount
-    ) internal onlyActivePool(_market) nonReentrant {
+    ) internal {
         IPendleStaking(pendleStaking).depositMarket(
             _market,
             _for,
@@ -164,7 +181,7 @@ contract PendleMarketDepositHelper is
         address _market,
         address _for,
         uint256 _amount
-    ) internal onlyActivePool(_market) nonReentrant {
+    ) internal {
         IPendleStaking(pendleStaking).withdrawMarket(_market, _for, _amount);
 
         emit NewWithdraw(_for, _market, _amount);
@@ -174,7 +191,7 @@ contract PendleMarketDepositHelper is
         address _market,
         address _for,
         uint256 _amount
-    ) internal onlyActivePool(_market) nonReentrant {
+    ) internal {
 
         IPendleStaking(pendleStaking).withdrawMarket(_market, _for, _amount);
        
@@ -187,6 +204,33 @@ contract PendleMarketDepositHelper is
         emit NewWithdraw(_for, _market, _amount);   
     }
 
+    function _emergencyWithdrawMarket(
+        address _market,
+        address _for,
+        uint256 _amount
+    ) internal {
+        IPendleStaking(pendleStaking).emergencyWithdraw(_market, _for, _amount);
+
+        emit NewEmergencyWithdraw(_for, _market, _amount);
+    }
+
+    function _emergencyWithdrawMarketWithClaim(
+        address _market,
+        address _for,
+        uint256 _amount
+    ) internal {
+
+        IPendleStaking(pendleStaking).emergencyWithdraw(_market, _for, _amount);
+       
+        address[] memory lps = new address[](1);
+        address[][] memory rewards = new address[][](1);
+        lps[0] = _market;
+        
+        IMasterPenpie(masterpenpie).multiclaimFor( lps, rewards, msg.sender);
+
+        emit NewEmergencyWithdraw(_for, _market, _amount);   
+    }
+
     /* ============ Admin Functions ============ */
 
     function setPoolInfo(
@@ -196,13 +240,25 @@ contract PendleMarketDepositHelper is
     ) external _onlyOperator {
         if (rewarder == address(0)) revert NullAddress();
         poolInfo[market] = PoolInfo(rewarder, isActive);
+
+        emit PoolInfoSet(market, rewarder, isActive);
+    }
+
+    function removePoolInfo(
+        address market
+    ) external _onlyOperator {
+        delete poolInfo[market];
     }
 
     function setOperator(address _address, bool _value) public onlyOwner {
         operator[_address] = _value;
+
+        emit OperatorSet(_address, _value);
     }
 
     function setmasterPenpie(address _masterPenpie) external onlyOwner {
         masterpenpie = _masterPenpie;
+
+        emit MasterPenpieSet(_masterPenpie);
     }
 }

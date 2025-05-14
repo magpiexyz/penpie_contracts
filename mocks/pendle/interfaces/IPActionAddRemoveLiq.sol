@@ -149,8 +149,9 @@ interface IPActionAddRemoveLiq {
         address market,
         uint256 minLpOut,
         ApproxParams calldata guessPtReceivedFromSy,
-        TokenInput calldata input
-    ) external payable returns (uint256 netLpOut, uint256 netSyFee);
+        TokenInput calldata input,
+        LimitOrderData calldata limit
+    ) external payable returns (uint256 netLpOut, uint256 netSyFee, uint256 netSyInterm);
 
     function addLiquiditySingleSyKeepYt(
         address receiver,

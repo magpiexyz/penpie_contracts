@@ -50,23 +50,7 @@ contract PendleStaking is PendleStakingBaseUpg {
 
     /// @notice get the penpie claimable revenue share in ETH
     function totalUnclaimedETH() external view returns (uint256) {
-        uint256 length = poolTokenList.length;
-        address[] memory _pools = new address[](length + 1);
-
-        for (uint256 i; i < length; i++) {
-            _pools[i] = poolTokenList[i];
-        }
-
-        _pools[length] = address(vePendle);
-        uint256[] memory unclaimedETH = distributorETH.getProtocolClaimables(
-            address(this),
-            _pools
-        );
-        uint256 _totalUnclaimedETH = 0;
-        for (uint256 i = 0; i < unclaimedETH.length; i++)
-            _totalUnclaimedETH += unclaimedETH[i];
-
-        return _totalUnclaimedETH;
+        return distributorETH.getProtocolTotalAccrued(address(this));
     }
 
     /* ============ VePendle Related Functions ============ */
@@ -74,7 +58,7 @@ contract PendleStaking is PendleStakingBaseUpg {
     function vote(
         address[] calldata _pools,
         uint64[] calldata _weights
-    ) external override {
+    ) external override nonReentrant {
         if (msg.sender != voteManager) revert OnlyVoteManager();
         if (_pools.length != _weights.length) revert LengthMismatch();
 
@@ -94,7 +78,7 @@ contract PendleStaking is PendleStakingBaseUpg {
     function convertPendle(
         uint256 _amount,
         uint256[] calldata chainId
-    ) public payable override whenNotPaused returns (uint256) {
+    ) public payable override nonReentrant whenNotPaused returns (uint256) {
         uint256 preVePendleAmount = accumulatedVePendle();
         if (_amount == 0) revert ZeroNotAllowed();
 
@@ -111,14 +95,14 @@ contract PendleStaking is PendleStakingBaseUpg {
         return mintedVePendleAmount;
     }
 
-    function increaseLockTime(uint256 _unlockTime) external {
+    function increaseLockTime(uint256 _unlockTime) external nonReentrant {
         uint128 unlockTime = WeekMath.getWeekStartTimestamp(
             uint128(block.timestamp + _unlockTime)
         );
         IPVotingEscrowMainchain(vePendle).increaseLockPosition(0, unlockTime);
     }
 
-    function harvestVePendleReward() external {
+    function harvestVePendleReward(address[] calldata _pools) external nonReentrant {
         if (this.totalUnclaimedETH() == 0) {
             revert NoVePendleReward();
         }
@@ -127,15 +111,6 @@ contract PendleStaking is PendleStakingBaseUpg {
             (protocolFee != 0 && feeCollector == address(0)) ||
             bribeManagerEOA == address(0)
         ) revert InvalidFeeDestination();
-
-        uint256 length = poolTokenList.length;
-        address[] memory _pools = new address[](length + 1);
-
-        for (uint256 i; i < length; i++) {
-            _pools[i] = poolTokenList[i];
-        }
-
-        _pools[length] = address(vePendle); //for claiming vePendle Reward
 
         (uint256 totalAmountOut, uint256[] memory amountsOut) = distributorETH
             .claimProtocol(address(this), _pools);

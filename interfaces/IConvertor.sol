@@ -11,4 +11,10 @@ interface IConvertor {
         address _for,
         uint256 _mode
     ) external;
+
+    function smartConvertFor(uint256 _amountIn, uint256 _mode, address _for) external returns (uint256 obtainedmWomAmount);
+
+    function mPendleSV() external returns (address);
+
+    function mPendleConvertor() external returns (address);
 }

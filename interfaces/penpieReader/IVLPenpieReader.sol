@@ -11,7 +11,7 @@ interface IVLPenpieReader {
      }    
     function getUserUnlockingSchedule(address _user) external view returns (UserUnlocking[] memory slots);
     function getUserAmountInCoolDown(address _user) external view returns (uint256);
-    function totalLocked() external view returns (uint256);
+    function balanceOf(address _user) external view returns (uint256);
     function getFullyUnlock(address _user) external view returns(uint256 unlockedAmount);
     function getRewardablePercentWAD(address _user) external view returns(uint256 percent);
     function totalAmountInCoolDown() external view returns (uint256);

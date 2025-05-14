@@ -67,7 +67,7 @@ contract VLPenpie is
     error InvalidAddress();
     error InvalidCoolDownPeriod();
     error PenaltyToNotSet();
-    error AlreadyMigrated();
+    error InvalidRewardablePercent();
 
     /* ============ Events ============ */
 
@@ -87,7 +87,6 @@ contract VLPenpie is
         uint256 amount
     );
     event ReLock(address indexed user, uint256 slotIdx, uint256 amount);
-    event WhitelistSet(address _for, bool _status);
     event NewMasterChiefUpdated(address _oldMaster, address _newMaster);
     event MaxSlotUpdated(uint256 _maxSlot);
     event CoolDownInSecsUpdated(uint256 _coolDownSecs);
@@ -99,6 +98,7 @@ contract VLPenpie is
     );
     event PenaltyDestinationUpdated(address penaltyDestination);
     event PenaltySentTo(address penaltyDestination, uint256 amount);
+    event PendleVoteManagerSet(address _pendleVoteManager);
 
     constructor() {
         _disableInitializers();
@@ -134,7 +134,7 @@ contract VLPenpie is
 
     // total Penpie locked, excluding the ones in cool down
     function totalLocked() public view override returns (uint256) {
-        return this.totalSupply() - this.totalAmountInCoolDown();
+        return totalSupply() - totalAmountInCoolDown;
     }
 
     /// @notice Get the total Penpie a user locked, not counting the ones in cool down
@@ -241,6 +241,8 @@ contract VLPenpie is
             }
         }
 
+        if (percent > 1e18) revert InvalidRewardablePercent();
+
         return percent;
     }
 
@@ -271,10 +273,7 @@ contract VLPenpie is
         uint256 waitingAmount = coolDownAmount - baseAmountToUser;
 
         uint256 unlockFactor = 1e12;
-        if (
-            (block.timestamp - slot.startTime) <=
-            (slot.endTime - slot.startTime)
-        )
+        if (block.timestamp <= slot.endTime)
             unlockFactor =
                 (((block.timestamp - slot.startTime) * 1e12) /
                     (slot.endTime - slot.startTime)) **
@@ -317,11 +316,13 @@ contract VLPenpie is
     function startUnlock(
         uint256 _amountToCoolDown
     ) external override whenNotPaused nonReentrant {
-        if (_amountToCoolDown > getUserTotalLocked(msg.sender))
+        uint256 userTotalLocked = getUserTotalLocked(msg.sender);
+
+        if (_amountToCoolDown > userTotalLocked)
             revert NotEnoughLockedPenpie();
 
-        uint256 totalLockAfterStartUnlock = getUserTotalLocked(msg.sender) -
-            _amountToCoolDown;
+        uint256 totalLockAfterStartUnlock = userTotalLocked - _amountToCoolDown;
+
         if (
             address(pendleVoteManager) != address(0) &&
             totalLockAfterStartUnlock <
@@ -330,14 +331,7 @@ contract VLPenpie is
             )
         ) revert NotEnoughLockedPenpie();
 
-        address[] memory lps = new address[](1);
-        address[][] memory vlPenpieRewards = new address[][](1);
-        lps[0] = address(this);
-        IMasterPenpie(masterPenpie).multiclaimFor(
-            lps,
-            vlPenpieRewards,
-            msg.sender
-        );
+        _claimFromMaster(msg.sender);
 
         uint256 _slotIndex = getNextAvailableUnlockSlot(msg.sender);
         totalAmountInCoolDown += _amountToCoolDown;
@@ -372,14 +366,7 @@ contract VLPenpie is
 
         if (slot.amountInCoolDown == 0) revert UnlockedAlready();
 
-        address[] memory lps = new address[](1);
-        address[][] memory vlPenpieRewards = new address[][](1);
-        lps[0] = address(this);
-        IMasterPenpie(masterPenpie).multiclaimFor(
-            lps,
-            vlPenpieRewards,
-            msg.sender
-        );
+        _claimFromMaster(msg.sender);
 
         uint256 unlockedAmount = slot.amountInCoolDown;
         _unlock(unlockedAmount);
@@ -390,11 +377,13 @@ contract VLPenpie is
         emit Unlock(msg.sender, block.timestamp, unlockedAmount);
     }
 
-    function cancelUnlock(uint256 _slotIndex) external override whenNotPaused {
+    function cancelUnlock(uint256 _slotIndex) external override whenNotPaused nonReentrant {
         _checkIdexInBoundary(msg.sender, _slotIndex);
         UserUnlocking storage slot = userUnlockings[msg.sender][_slotIndex];
 
         _checkInCoolDown(msg.sender, _slotIndex);
+
+        _claimFromMaster(msg.sender);
 
         totalAmountInCoolDown -= slot.amountInCoolDown; // reduce amount to cool down accordingly
         slot.amountInCoolDown = 0; // not in cool down anymore
@@ -408,12 +397,23 @@ contract VLPenpie is
     ) external whenNotPaused nonReentrant {
         _checkIdexInBoundary(msg.sender, _slotIndex);
         UserUnlocking storage slot = userUnlockings[msg.sender][_slotIndex];
-        _checkInCoolDown(msg.sender, _slotIndex);
 
-        _unlock(slot.amountInCoolDown);
-        (uint256 penaltyAmount, uint256 amountToUser) = expectedPenaltyAmount(
-            _slotIndex
-        );
+         // Check if the slot is already unlocked (amountInCoolDown == 0) and revert if so
+        if (slot.amountInCoolDown == 0) {
+            revert UnlockedAlready();
+        }
+
+        uint256 penaltyAmount = 0;
+        uint256 amountToUser = slot.amountInCoolDown; // Default to the full amount
+
+        _claimFromMaster(msg.sender);
+
+        // If the current time is not beyond the slot's endTime, then there's penalty.
+        if (block.timestamp < slot.endTime) {
+            (penaltyAmount, amountToUser) = expectedPenaltyAmount(_slotIndex);
+        }
+        
+        _unlock(slot.amountInCoolDown); 
 
         IERC20(penpie).safeTransfer(msg.sender, amountToUser);
         totalPenalty += penaltyAmount;
@@ -438,11 +438,11 @@ contract VLPenpie is
         if(penaltyDestination == address(0))
             revert PenaltyToNotSet();
 
-        IERC20(penpie).safeTransfer(penaltyDestination, totalPenalty);
-
-        emit PenaltySentTo(penaltyDestination, totalPenalty);
-
+        uint256 penaltyAmount = totalPenalty;
         totalPenalty = 0;
+        IERC20(penpie).safeTransfer(penaltyDestination, penaltyAmount);
+
+        emit PenaltySentTo(penaltyDestination, penaltyAmount);
     }
 
     function setMasterChief(address _masterPenpie) external onlyOwner {
@@ -483,6 +483,7 @@ contract VLPenpie is
         address _pendleVoteManager
     ) external onlyOwner {
         pendleVoteManager = _pendleVoteManager;
+        emit PendleVoteManagerSet(_pendleVoteManager);
     }
 
     /* ============ Internal Functions ============ */
@@ -517,7 +518,7 @@ contract VLPenpie is
     ) internal {
         penpie.safeTransferFrom(spender, address(this), _amount);
         IMasterPenpie(masterPenpie).depositVlPenpieFor(_amount, _for);
-        totalAmount += _amount; // trigers update pool share, so happens after toal amount increase
+        totalAmount += _amount; // trigers update pool share, so happens after total amount increase
     }
 
     function _beforeTokenTransfer(
@@ -528,4 +529,14 @@ contract VLPenpie is
         revert TransferNotAllowed();
     }
 
+    function _claimFromMaster(address _user) internal {
+        address[] memory lps = new address[](1);
+        address[][] memory vlPNPRewards = new address[][](1);
+        lps[0] = address(this);
+        IMasterPenpie(masterPenpie).multiclaimFor(
+            lps,
+            vlPNPRewards,
+            _user
+        );
+    }
 }

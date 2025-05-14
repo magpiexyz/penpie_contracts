@@ -23,6 +23,7 @@ import {IPenpieBribeManagerReader} from "./interfaces/penpieReader/IPenpieBribeM
 import {IPendleVoteManagerReader} from "./interfaces/penpieReader/IPendleVoteManagerReader.sol";
 import {IPVeToken} from "./interfaces/pendle/IPVeToken.sol"; 
 import {IWombatRouterReader} from "./interfaces/wombat/IWombatRouterReader.sol";
+import { IBaseRewardPool } from "./interfaces/IBaseRewardPool.sol";
 /// @title MagpieReader for Arbitrum
 /// @author Magpie Team
 
@@ -43,6 +44,12 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
         address[] pools;
         address chainlink;
         uint256 routerType;
+    }
+
+    struct PenpieLegacyRewardInfo {
+        uint256[]  pendingBonusRewards;
+        address[]  bonusTokenAddresses;
+        string[] bonusTokenSymbols;
     }
 
     struct PenpieInfo {
@@ -82,6 +89,7 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
         PenpieRewardInfo rewardInfo;
         VlPenpieLockInfo vlPenpieLockInfo;
         VlPenpieLockInfo mPendleLockInfo;
+        PenpieLegacyRewardInfo legacyRewardInfo;
     }
 
     struct VlPenpieLockInfo {
@@ -219,15 +227,21 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
     /* === Added for integrating mPendleSV ==*/
     address public mPendleSV;
 
+    /* === Added for PCS mPENDLE ==*/
+    mapping(address => bool) public isPCSMPendleMarket;
+
     /* ============ Events ============ */
+    event UpdatePCSMPendleMarketStatus(address indexed _market, bool _allowed);
 
     /* ============ Errors ============ */
 
     /* ============ Constructor ============ */
 
-    function __PenpieReader_init() public initializer {
-        __Ownable_init();
-    }
+    // constructor() { _disableInitializers(); }
+
+    // function __PenpieReader_init() public initializer {
+    //     __Ownable_init();
+    // }
 
     /* ============ External Getters ============ */
 
@@ -370,8 +384,7 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
             penpiePool.poolType = "VLPENPIE_POOL";
             penpiePool.stakedTokenInfo = getERC20TokenInfo(penpiePool.stakingToken);
             penpiePool.vlPenpieLockInfo = getVlPenpieLockInfo(account, vlPenpie);
-        }
-        else if (penpiePool.stakingToken == penpieOFT) {
+        } else if (penpiePool.stakingToken == penpieOFT) {
             penpiePool.poolType = "PENPIEOFT_POOL";
             penpiePool.stakedTokenInfo = getERC20TokenInfo(penpiePool.stakingToken);
         }
@@ -383,6 +396,10 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
             penpiePool.poolType = "PENPIE_MPENDLESV_POOL";
             penpiePool.stakedTokenInfo = getERC20TokenInfo(penpiePool.stakingToken);
             penpiePool.mPendleLockInfo = getVlPenpieLockInfo(account, mPendleSV);
+        }
+        else if (isPCSMPendleMarket[penpiePool.stakingToken]) {
+            penpiePool.poolType = "PCS_MPENDLE-PENDLE_LP_POOL";
+            penpiePool.stakedTokenInfo = getERC20TokenInfo(penpiePool.stakingToken);
         }
         else if (penpiePool.stakingToken != penpiePool.receiptToken) {
             penpiePool.isPendleMarket = true;
@@ -407,6 +424,7 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
             pendleStakingPoolInfo.lastHarvestTime = poolInfo.lastHarvestTime;
             pendleStakingPoolInfo.activeBalance = pendleMarketReader.activeBalance(address(pendleStaking));
             pendleStakingPoolInfo.lpBalance = ERC20(pendleMarket.marketAddress).balanceOf(address(pendleStaking));
+            penpiePool.totalStaked = ERC20(pendleMarket.marketAddress).balanceOf(address(pendleStaking));
             penpiePool.pendleStakingPoolInfo = pendleStakingPoolInfo;
             penpiePool.pendleMarket = pendleMarket;
             penpiePool.stakedTokenInfo = getERC20TokenInfo(pendleMarket.marketAddress);
@@ -416,8 +434,44 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
         if (account != address(0)) {
             penpiePool.accountInfo = getPenpieAccountInfo(penpiePool, account);
             penpiePool.rewardInfo = getPenpieRewardInfo(penpiePool.stakingToken, account);
+            penpiePool.legacyRewardInfo = getPenpieLegacyRewardInfo(
+                penpiePool.stakingToken,
+                account
+            );
         }
         return penpiePool;
+    }
+
+    function getPenpieLegacyRewardInfo(
+        address stakingToken,
+        address account
+    ) public view returns (PenpieLegacyRewardInfo memory) {
+        PenpieLegacyRewardInfo memory rewardInfo;
+        address rewarderAddress = masterPenpie.legacyRewarders(stakingToken);
+        if (rewarderAddress != address(0)) {
+            (rewardInfo.bonusTokenAddresses, rewardInfo.bonusTokenSymbols, rewardInfo.pendingBonusRewards) = _allPendingTokensFrom(rewarderAddress, account);
+        }
+        return rewardInfo;
+    }
+
+    function _allPendingTokensFrom(
+        address _rewarder,
+        address _user
+    )
+        internal
+        view
+        returns (
+            address[] memory bonusTokenAddresses,
+            string[] memory bonusTokenSymbols,
+            uint256[] memory pendingBonusRewards
+        )
+    {
+        // If it's a multiple reward farm, we return all info about the bonus tokens
+        if (address(_rewarder) != address(0)) {
+            (bonusTokenAddresses, bonusTokenSymbols) = IBaseRewardPool(_rewarder)
+                .rewardTokenInfos();
+            pendingBonusRewards = IBaseRewardPool(_rewarder).allEarned(_user);
+        }
     }
 
     function getVlPenpieLockInfo(address account, address locker) public view returns (VlPenpieLockInfo memory) {
@@ -591,11 +645,11 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
 
     /* ============ Admin Functions ============ */
 
-    function addTokenCamelotRouter(address tokenAddress, address [] memory paths, address[] memory pools) external onlyOwner  {
-        TokenRouter memory tokenRouter = _addTokenRouteInteral(tokenAddress, paths, pools);
-        tokenRouter.routerType = CamelotRouterType;
-        tokenRouterMap[tokenAddress] = tokenRouter;
-    }
+    // function addTokenCamelotRouter(address tokenAddress, address [] memory paths, address[] memory pools) external onlyOwner  {
+    //     TokenRouter memory tokenRouter = _addTokenRouteInteral(tokenAddress, paths, pools);
+    //     tokenRouter.routerType = CamelotRouterType;
+    //     tokenRouterMap[tokenAddress] = tokenRouter;
+    // }
 
     // function addUniswapV3Router(address tokenAddress, address [] memory paths, address[] memory pools) external onlyOwner  {
     //     TokenRouter memory tokenRouter = _addTokenRouteInteral(tokenAddress, paths, pools);
@@ -609,18 +663,18 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
     //     tokenRouterMap[tokenAddress] = tokenRouter;
     // }        
 
-    function addTokenChainlink(address tokenAddress, address [] memory paths, address[] memory pools, address priceAddress) external onlyOwner  {
-        TokenRouter memory tokenRouter = _addTokenRouteInteral(tokenAddress, paths, pools);
-        tokenRouter.routerType = ChainlinkType;
-        tokenRouter.chainlink = priceAddress;
-        tokenRouterMap[tokenAddress] = tokenRouter;
-    }
+    // function addTokenChainlink(address tokenAddress, address [] memory paths, address[] memory pools, address priceAddress) external onlyOwner  {
+    //     TokenRouter memory tokenRouter = _addTokenRouteInteral(tokenAddress, paths, pools);
+    //     tokenRouter.routerType = ChainlinkType;
+    //     tokenRouter.chainlink = priceAddress;
+    //     tokenRouterMap[tokenAddress] = tokenRouter;
+    // }
 
-    function addTokenWombatRouter(address tokenAddress, address [] memory paths, address[] memory pools) external onlyOwner  {
-        TokenRouter memory tokenRouter = _addTokenRouteInteral(tokenAddress, paths, pools);
-        tokenRouter.routerType = WombatRouterType;
-        tokenRouterMap[tokenAddress] = tokenRouter;
-    }    
+    // function addTokenWombatRouter(address tokenAddress, address [] memory paths, address[] memory pools) external onlyOwner  {
+    //     TokenRouter memory tokenRouter = _addTokenRouteInteral(tokenAddress, paths, pools);
+    //     tokenRouter.routerType = WombatRouterType;
+    //     tokenRouterMap[tokenAddress] = tokenRouter;
+    // }    
 
     // function setMasterPenpie(IMasterPenpieReader _masterPenpie)  external onlyOwner  {
     //     masterPenpie = _masterPenpie;
@@ -637,17 +691,23 @@ contract PenpieReader is Initializable, OwnableUpgradeable {
     //     autoBribeFee = pendleStaking.autoBribeFee();
     // }
 
-    // function setPenpieBribeManager(IPenpieBribeManagerReader _penpieBribeManager) external onlyOwner  {
-    //     penpieBribeManager = _penpieBribeManager;
-    //     penpieVoteManager =  IPendleVoteManagerReader(_penpieBribeManager.voteManager());
+    // function updatePCSMPendleMarketStatus(address _market, bool _allowed) external onlyOwner {
+    //     isPCSMPendleMarket[_market] = _allowed;
+
+    //     emit UpdatePCSMPendleMarketStatus(_market, _allowed);
     // }
 
-    function setWombatRouter(address _wombatRouter) external onlyOwner  {
-        wombatRouter = IWombatRouterReader(_wombatRouter);
-    }    
-
-    function setMPendleSV(address _mPendleSV)  external onlyOwner  {
-        require(_mPendleSV != address(0), "Should have Valid Non Zero Address");
-        mPendleSV = _mPendleSV;
+    function setPenpieBribeManager(IPenpieBribeManagerReader _penpieBribeManager) external onlyOwner  {
+        penpieBribeManager = _penpieBribeManager;
+        penpieVoteManager =  IPendleVoteManagerReader(_penpieBribeManager.voteManager());
     }
+
+    // function setWombatRouter(address _wombatRouter) external onlyOwner  {
+    //     wombatRouter = IWombatRouterReader(_wombatRouter);
+    // }    
+
+    // function setMPendleSV(address _mPendleSV)  external onlyOwner  {
+    //     require(_mPendleSV != address(0), "Should have Valid Non Zero Address");
+    //     mPendleSV = _mPendleSV;
+    // }
 }

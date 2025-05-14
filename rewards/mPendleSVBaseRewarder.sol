@@ -228,13 +228,14 @@ contract mPendleSVBaseRewarder is IBaseRewardPool, Initializable, OwnableUpgrade
 
     /// @notice Updates the reward information for one account
     /// @param _account Address account
-    function updateFor(address _account) external override {
+    function updateFor(address _account) external override nonReentrant {
         _updateFor(_account);
     }
 
     function getReward(address _account, address _receiver)
         public
         onlyMasterPenpie
+        nonReentrant
         updateReward(_account)
         returns (bool)
     {
@@ -280,6 +281,7 @@ contract mPendleSVBaseRewarder is IBaseRewardPool, Initializable, OwnableUpgrade
     function queueNewRewards(uint256 _amountReward, address _rewardToken)
         override
         external
+        nonReentrant
         onlyManager
         returns (bool)
     {
@@ -295,7 +297,7 @@ contract mPendleSVBaseRewarder is IBaseRewardPool, Initializable, OwnableUpgrade
     /// @notice Sends new rewards to be distributed to the users staking. Only possible to donate already registered token
     /// @param _amountReward Amount of reward token to be distributed
     /// @param _rewardToken Address reward token
-    function donateRewards(uint256 _amountReward, address _rewardToken) external {
+    function donateRewards(uint256 _amountReward, address _rewardToken) external nonReentrant {
         if (!isRewardToken[_rewardToken])
             revert MustBeRewardToken();
 
@@ -385,15 +387,17 @@ contract mPendleSVBaseRewarder is IBaseRewardPool, Initializable, OwnableUpgrade
     }
 
     function _calExpireForfeit(address _account, uint256 _amount) internal view returns (uint256) {
-        uint256 rewardableAmount = _amount;
+        uint256 rewardablePercentWAD = mPendleSV.getRewardablePercentWAD(
+            _account
+        );
+        uint256 rewardableAmount = (_amount * rewardablePercentWAD) / 1e18;
         if (rewardableAmount > _amount)
             revert InvalidRewardableAmount();
 
         uint256 forfeitAmount = _amount - rewardableAmount;
-        
+
         if (forfeitAmount < (_amount / 1000)) {  // if forfeitAmount is smaller than 0.1% ignore to save gas fee
             forfeitAmount = 0;
-            rewardableAmount = _amount;
         }
 
         return forfeitAmount;
